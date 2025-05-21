@@ -1,0 +1,58 @@
+[project]
+name = "x-transformers-rl"
+version = "0.0.1"
+description = "X-Transformer for RL"
+authors = [
+    { name = "Phil Wang", email = "lucidrains@gmail.com" }
+]
+readme = "README.md"
+requires-python = ">= 3.8"
+license = { file = "LICENSE" }
+keywords = [
+    'artificial intelligence',
+    'deep learning',
+    'transformers',
+    'reinforcement learning'
+  ]
+classifiers=[
+    'Development Status :: 4 - Beta',
+    'Intended Audience :: Developers',
+    'Topic :: Scientific/Engineering :: Artificial Intelligence',
+    'License :: OSI Approved :: MIT License',
+    'Programming Language :: Python :: 3.8',
+  ]
+
+dependencies = [
+    'adam-atan2-pytorch',
+    'assoc-scan',
+    'einx>=0.3.0',
+    'einops>=0.8.0',
+    'hl-gauss-pytorch',
+    'torch>=2.4',
+    'tqdm',
+    'x-transformers'
+]
+
+[project.urls]
+Homepage = "https://pypi.org/project/x-transformers-rl/"
+Repository = "https://github.com/lucidrains/x-transformers-rl"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+]
+
+[tool.pytest.ini_options]
+pythonpath = [
+  "."
+]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["x_transformers_rl"]
