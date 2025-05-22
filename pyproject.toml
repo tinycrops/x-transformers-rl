@@ -23,6 +23,7 @@ classifiers=[
   ]
 
 dependencies = [
+    'accelerate',
     'adam-atan2-pytorch',
     'assoc-scan',
     'einx>=0.3.0',
