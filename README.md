@@ -2,6 +2,20 @@
 
 Implementation of a transformer for reinforcement learning using `x-transformers`
 
+## Example
+
+### Lunar Lander
+
+```bash
+$ pip install -r requirements.txt
+```
+
+Then
+
+```python
+$ python train_lander.py
+```
+
 ## Citation
 
 ```bibtex
