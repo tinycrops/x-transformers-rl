@@ -54,7 +54,6 @@ Memory = namedtuple('Memory', [
     'reward',
     'is_boundary',
     'value',
-    'dones'
 ])
 
 # helpers
@@ -125,8 +124,9 @@ class WorldModelActorCritic(Module):
 
         dim = transformer.attn_layers.dim
 
-        self.to_dones = nn.Sequential(
-            nn.Linear(dim * 2, 2),
+        self.to_pred_done = nn.Sequential(
+            nn.Linear(dim * 2, 1),
+            Rearrange('... 1 -> ...'),
             nn.Sigmoid()            
         )
 
@@ -278,7 +278,7 @@ class WorldModelActorCritic(Module):
             state_mean, state_log_var = self.to_pred(embed_with_actions)
 
             state_pred = stack((state_mean, state_log_var.exp()))
-            dones = self.to_dones(embed_with_actions)
+            dones = self.to_pred_done(embed_with_actions)
 
         # actor critic heads living on top of transformer - basically approaching online decision transformer except critic learn discounted returns
 
@@ -512,7 +512,6 @@ class Agent(Module):
             rewards,
             is_boundaries,
             values,
-            dones
         ) = tuple(map(pad_sequence, zip(*memories)))
 
         masks = ~is_boundaries
@@ -540,7 +539,7 @@ class Agent(Module):
             old_log_probs,
             returns,
             values,
-            dones,
+            is_boundaries,
             episode_lens
         )
 
@@ -795,8 +794,7 @@ class Learner(Module):
                 prev_action = action
                 prev_reward = tensor(reward).to(device) # from the xval paper, we know pre-norm transformers can handle scaled tokens https://arxiv.org/abs/2310.02989
 
-                dones_signal = tensor([terminated, truncated])
-                memory = Memory(tensor(eps), state, action, action_log_prob, tensor(reward), tensor(terminated), value, dones_signal)
+                memory = Memory(tensor(eps), state, action, action_log_prob, tensor(reward), tensor(terminated), value)
 
                 one_episode_memories.append(memory)
 
@@ -843,3 +841,8 @@ class Learner(Module):
 
             if divisible_by(eps, self.save_every):
                 self.agent.save()
+
+
+        self.agent.save()
+
+        print(f'training complete')
