@@ -39,6 +39,10 @@ from assoc_scan import AssocScan
 
 from accelerate import Accelerator
 
+from x_transformers_rl.evolution import (
+    LatentGenePool
+)
+
 # memory tuple
 
 Memory = namedtuple('Memory', [
