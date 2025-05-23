@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import fire
 from pathlib import Path
-from shutil import rmtree
 from copy import deepcopy
 from functools import partial, wraps
 from collections import deque, namedtuple
@@ -39,11 +37,7 @@ from x_transformers import (
 
 from assoc_scan import AssocScan
 
-import gymnasium as gym
-
-# constants
-
-device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+from accelerate import Accelerator
 
 # memory tuple
 
@@ -367,12 +361,11 @@ def calc_gae(
 
 # agent
 
-class PPO(Module):
+class Agent(Module):
     def __init__(
         self,
         state_dim,
         num_actions,
-        critic_pred_num_bins,
         reward_range: tuple[float, float],
         epochs,
         max_timesteps,
@@ -387,6 +380,7 @@ class PPO(Module):
         eps_clip,
         value_clip,
         ema_decay,
+        critic_pred_num_bins = 100,
         hidden_dim = 48,
         world_model: dict = dict(
             attn_dim_head = 16,
@@ -462,6 +456,12 @@ class PPO(Module):
 
         self.save_path = Path(save_path)
 
+        self.register_buffer('dummy', tensor(0), persistent = False)
+
+    @property
+    def device(self):
+        return self.dummy.device
+
     def save(self):
         torch.save({
             'model': self.model.state_dict(),
@@ -483,14 +483,12 @@ class PPO(Module):
         # retrieve and prepare data from memory for training - list[list[Memory]]
 
         def stack_and_to_device(t):
-            return stack(t).to(device)
+            return stack(t).to(self.device)
 
         def stack_memories(episode_memories):
             return tuple(map(stack_and_to_device, zip(*episode_memories)))
 
         memories = map(stack_memories, memories)
-
-        episode_lens = episode_lens.to(device)
 
         (
             episodes,
@@ -551,7 +549,7 @@ class PPO(Module):
                 episode_lens
              ) in dl:
 
-                seq = torch.arange(states.shape[1], device = device)
+                seq = torch.arange(states.shape[1], device = self.device)
                 mask = einx.less('n, b -> b n', seq, episode_lens)
 
                 prev_actions = F.pad(actions, (1, -1), value = -1)
@@ -620,190 +618,197 @@ class PPO(Module):
 
 # main
 
-def main(
-    env_name = 'LunarLander-v3',
-    num_episodes = 50000,
-    max_timesteps = 500,
-    critic_pred_num_bins = 100,
-    reward_range = (-100, 100),
-    minibatch_size = 8,
-    update_episodes = 64,
-    lr = 0.0008,
-    betas = (0.9, 0.99),
-    lam = 0.95,
-    gamma = 0.99,
-    eps_clip = 0.2,
-    value_clip = 0.4,
-    beta_s = .01,
-    regen_reg_rate = 1e-4,
-    cautious_factor = 0.1,
-    render = True,
-    clear_videos = True,
-    epochs = 4,
-    ema_decay = 0.9,
-    seed = None,
-    render_every_eps = 250,
-    save_every = 1000,
-    video_folder = './lunar-recording',
-    load = False,
-):
-    assert divisible_by(update_episodes, minibatch_size)
-
-    env = gym.make(env_name, render_mode = 'rgb_array')
-
-    if render:
-        if clear_videos:
-            rmtree(video_folder, ignore_errors = True)
-
-        env = gym.wrappers.RecordVideo(
-            env = env,
-            video_folder = video_folder,
-            name_prefix = 'lunar-video',
-            episode_trigger = lambda eps_num: divisible_by(eps_num, render_every_eps),
-            disable_logger = True
-        )
-
-    state_dim = env.observation_space.shape[0]
-    num_actions = env.action_space.n
-
-    memories = deque([])
-    episode_lens = []
-
-    agent = PPO(
+class Learner(Module):
+    def __init__(
+        self,
         state_dim,
         num_actions,
-        critic_pred_num_bins,
         reward_range,
-        epochs,
-        max_timesteps,
-        minibatch_size,
-        lr,
-        betas,
-        lam,
-        gamma,
-        beta_s,
-        regen_reg_rate,
-        cautious_factor,
-        eps_clip,
-        value_clip,
-        ema_decay,
-    ).to(device)
+        world_model: dict,
+        num_episodes = 50000,
+        max_timesteps = 500,
+        minibatch_size = 8,
+        update_episodes = 64,
+        lr = 0.0008,
+        betas = (0.9, 0.99),
+        lam = 0.95,
+        gamma = 0.99,
+        eps_clip = 0.2,
+        value_clip = 0.4,
+        beta_s = .01,
+        regen_reg_rate = 1e-4,
+        cautious_factor = 0.1,
+        epochs = 4,
+        ema_decay = 0.9,
+        save_every = 100,
+        accelerate_kwargs: dict = dict()
+    ):
+        super().__init__()
 
-    if load:
-        agent.load()
+        assert divisible_by(update_episodes, minibatch_size)
 
-    if exists(seed):
-        torch.manual_seed(seed)
-        np.random.seed(seed)
+        self.accelerator = Accelerator(**accelerate_kwargs)
 
-    time = 0
-    num_policy_updates = 0
+        self.agent = Agent(
+            state_dim = state_dim,
+            num_actions = num_actions,
+            reward_range = reward_range,
+            world_model = world_model,
+            epochs = epochs,
+            max_timesteps = max_timesteps,
+            minibatch_size = minibatch_size,
+            lr = lr,
+            betas = betas,
+            lam = lam,
+            gamma = gamma,
+            beta_s = beta_s,
+            regen_reg_rate = regen_reg_rate,
+            cautious_factor = cautious_factor,
+            eps_clip = eps_clip,
+            value_clip = value_clip,
+            ema_decay = ema_decay,
+        )
 
-    agent.eval()
-    model = agent.ema_model
+        self.update_episodes = update_episodes
+        self.minibatch_size = minibatch_size
 
-    for eps in tqdm(range(num_episodes), desc = 'episodes'):
+        self.max_timesteps = max_timesteps
+        self.num_episodes = num_episodes
 
-        one_episode_memories = deque([])
+        # saving agent
 
-        eps_tensor = tensor(eps)
+        self.save_every = save_every
 
-        state, info = env.reset(seed = seed)
-        state = torch.from_numpy(state).to(device)
+        # move to device
 
-        prev_action = tensor(-1).to(device)
-        prev_reward = tensor(0.).to(device)
+        self.to(self.device)
 
-        world_model_cache = None
+    @property
+    def device(self):
+        return self.accelerator.device
 
-        @torch.no_grad()
-        def state_to_pred_action_and_value(state, prev_action, prev_reward):
-            nonlocal world_model_cache
+    def forward(
+        self,
+        env,
+        seed = None,
+    ):
+        device = self.device
 
-            state_with_reward = cat((state, rearrange(prev_reward, '-> 1')), dim = -1)
+        memories = deque([])
+        episode_lens = []
 
-            agent.rsmnorm.eval()
-            normed_state = agent.rsmnorm(state_with_reward)
+        if exists(seed):
+            torch.manual_seed(seed)
+            np.random.seed(seed)
 
-            model.eval()
+        time = 0
+        num_policy_updates = 0
 
-            normed_state = rearrange(normed_state, 'd -> 1 1 d')
-            prev_action = rearrange(prev_action, ' -> 1 1')
-            prev_reward = rearrange(prev_reward, ' -> 1 1')
+        self.agent.eval()
+        model = self.agent.ema_model
 
-            action_probs, values, _, _, world_model_cache = model.forward_eval(
-                normed_state,
-                cache = world_model_cache,
-                actions = prev_action
-            )
+        for eps in tqdm(range(self.num_episodes), desc = 'episodes'):
 
-            action_probs = rearrange(action_probs, '1 1 d -> d')
-            values = rearrange(values, '1 1 d -> d')
-            return action_probs, values
+            one_episode_memories = deque([])
 
-        for timestep in range(max_timesteps):
-            time += 1
-            
-            action_probs, value = state_to_pred_action_and_value(state, prev_action, prev_reward)
+            eps_tensor = tensor(eps)
 
-            dist = Categorical(action_probs)
-            action = dist.sample()
-            action_log_prob = dist.log_prob(action)
+            state, info = env.reset(seed = seed)
+            state = torch.from_numpy(state).to(device)
 
-            next_state, reward, terminated, truncated, _ = env.step(action.item())
+            prev_action = tensor(-1).to(device)
+            prev_reward = tensor(0.).to(device)
 
-            next_state = torch.from_numpy(next_state).to(device)
+            world_model_cache = None
 
-            reward = float(reward)
+            @torch.no_grad()
+            def state_to_pred_action_and_value(state, prev_action, prev_reward):
+                nonlocal world_model_cache
 
-            prev_action = action
-            prev_reward = tensor(reward).to(device) # from the xval paper, we know pre-norm transformers can handle scaled tokens https://arxiv.org/abs/2310.02989
+                state_with_reward = cat((state, rearrange(prev_reward, '-> 1')), dim = -1)
 
-            dones_signal = tensor([terminated, truncated])
-            memory = Memory(tensor(eps), state, action, action_log_prob, tensor(reward), tensor(terminated), value, dones_signal)
+                self.agent.rsmnorm.eval()
+                normed_state = self.agent.rsmnorm(state_with_reward)
 
-            one_episode_memories.append(memory)
+                model.eval()
 
-            state = next_state
+                normed_state = rearrange(normed_state, 'd -> 1 1 d')
+                prev_action = rearrange(prev_action, ' -> 1 1')
+                prev_reward = rearrange(prev_reward, ' -> 1 1')
 
-            # determine if truncating or terminated
-
-            done = terminated or truncated
-
-            # take care of truncated by adding a non-learnable memory storing the next value for GAE
-
-            if done and not terminated:
-                _, next_value, *_ = state_to_pred_action_and_value(state, prev_action, prev_reward)
-
-                bootstrap_value_memory = memory._replace(
-                    state = state,
-                    eps = tensor(-1),
-                    is_boundary = tensor(True),
-                    value = next_value
+                action_probs, values, _, _, world_model_cache = model.forward_eval(
+                    normed_state,
+                    cache = world_model_cache,
+                    actions = prev_action
                 )
 
-                memories.append(bootstrap_value_memory)
+                action_probs = rearrange(action_probs, '1 1 d -> d')
+                values = rearrange(values, '1 1 d -> d')
+                return action_probs, values
 
-            # break if done
+            for timestep in range(self.max_timesteps):
+                time += 1
+                
+                action_probs, value = state_to_pred_action_and_value(state, prev_action, prev_reward)
 
-            if done:
-                break
+                dist = Categorical(action_probs)
+                action = dist.sample()
+                action_log_prob = dist.log_prob(action)
 
-        episode_lens.append(timestep + 1)
+                next_state, reward, terminated, truncated, _ = env.step(action.item())
 
-        # add list[Memory] to all episode memories list[list[Memory]]
+                next_state = torch.from_numpy(next_state).to(device)
 
-        memories.append(one_episode_memories)
+                reward = float(reward)
 
-        # updating of the agent
+                prev_action = action
+                prev_reward = tensor(reward).to(device) # from the xval paper, we know pre-norm transformers can handle scaled tokens https://arxiv.org/abs/2310.02989
 
-        if divisible_by(len(memories), update_episodes):
+                dones_signal = tensor([terminated, truncated])
+                memory = Memory(tensor(eps), state, action, action_log_prob, tensor(reward), tensor(terminated), value, dones_signal)
 
-            agent.learn(memories, tensor(episode_lens))
-            num_policy_updates += 1
+                one_episode_memories.append(memory)
 
-            memories.clear()
-            episode_lens.clear()
+                state = next_state
 
-        if divisible_by(eps, save_every):
-            agent.save()
+                # determine if truncating or terminated
+
+                done = terminated or truncated
+
+                # take care of truncated by adding a non-learnable memory storing the next value for GAE
+
+                if done and not terminated:
+                    _, next_value, *_ = state_to_pred_action_and_value(state, prev_action, prev_reward)
+
+                    bootstrap_value_memory = memory._replace(
+                        state = state,
+                        eps = tensor(-1),
+                        is_boundary = tensor(True),
+                        value = next_value
+                    )
+
+                    memories.append(bootstrap_value_memory)
+
+                # break if done
+
+                if done:
+                    break
+
+            episode_lens.append(timestep + 1)
+
+            # add list[Memory] to all episode memories list[list[Memory]]
+
+            memories.append(one_episode_memories)
+
+            # updating of the agent
+
+            if divisible_by(len(memories), self.update_episodes):
+
+                self.agent.learn(memories, tensor(episode_lens, device = device))
+                num_policy_updates += 1
+
+                memories.clear()
+                episode_lens.clear()
+
+            if divisible_by(eps, self.save_every):
+                self.agent.save()
