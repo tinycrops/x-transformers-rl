@@ -92,14 +92,23 @@ def temp_batch_dim(fn):
 
     return inner
 
-def from_numpy(t):
+def from_numpy(
+    t,
+    dtype = torch.float32
+):
+    if is_tensor(t):
+        return t
+
     if isinstance(t, np.float64):
         t = np.array(t)
 
     if isinstance(t, np.ndarray):
         t = torch.from_numpy(t)
 
-    return t.float()
+    if exists(dtype):
+        t = t.type(dtype)
+
+    return t
 
 # world model + actor / critic in one
 
@@ -383,7 +392,7 @@ class Agent(Module):
         reward_range: tuple[float, float],
         epochs,
         max_timesteps,
-        minibatch_size,
+        batch_size,
         lr,
         betas,
         lam,
@@ -457,7 +466,7 @@ class Agent(Module):
 
         # learning hparams
 
-        self.minibatch_size = minibatch_size
+        self.batch_size = batch_size
 
         self.epochs = epochs
 
@@ -543,7 +552,7 @@ class Agent(Module):
             episode_lens
         )
 
-        dl = DataLoader(dataset, batch_size = self.minibatch_size, shuffle = True)
+        dl = DataLoader(dataset, batch_size = self.batch_size, shuffle = True)
 
         model.train()
 
@@ -629,6 +638,29 @@ class Agent(Module):
 
         self.rsmnorm.load_state_dict(rsmnorm_copy.state_dict())
 
+    def forward(
+        self,
+        state,
+        hiddens = None
+    ):
+
+        state = from_numpy(state)
+        state = state.to(self.device)
+        state = rearrange(state, 'd -> 1 1 d')
+
+        with torch.no_grad():
+            self.rsmnorm.eval()
+            normed_state = self.rsmnorm(state)
+
+        action_probs, *_, next_hiddens = self.model(
+            normed_state,
+            cache = hiddens,
+        )
+
+        action_probs = rearrange(action_probs, '1 1 d -> d')
+
+        return action_probs, next_hiddens
+
 # main
 
 class Learner(Module):
@@ -639,7 +671,7 @@ class Learner(Module):
         reward_range,
         world_model: dict,
         max_timesteps = 500,
-        minibatch_size = 8,
+        batch_size = 8,
         update_episodes = 64,
         lr = 0.0008,
         betas = (0.9, 0.99),
@@ -657,7 +689,7 @@ class Learner(Module):
     ):
         super().__init__()
 
-        assert divisible_by(update_episodes, minibatch_size)
+        assert divisible_by(update_episodes, batch_size)
 
         self.accelerator = Accelerator(**accelerate_kwargs)
 
@@ -668,7 +700,7 @@ class Learner(Module):
             world_model = world_model,
             epochs = epochs,
             max_timesteps = max_timesteps,
-            minibatch_size = minibatch_size,
+            batch_size = batch_size,
             lr = lr,
             betas = betas,
             lam = lam,
@@ -682,7 +714,6 @@ class Learner(Module):
         )
 
         self.update_episodes = update_episodes
-        self.minibatch_size = minibatch_size
 
         self.max_timesteps = max_timesteps
 
