@@ -1,6 +1,6 @@
 [project]
 name = "x-transformers-rl"
-version = "0.0.2"
+version = "0.0.3"
 description = "X-Transformer for RL"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
@@ -50,7 +50,7 @@ test = [
 
 [tool.pytest.ini_options]
 pythonpath = [
-  "."
+    "."
 ]
 
 [tool.hatch.metadata]
