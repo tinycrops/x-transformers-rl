@@ -1,6 +1,6 @@
 [project]
 name = "x-transformers-rl"
-version = "0.0.1"
+version = "0.0.2"
 description = "X-Transformer for RL"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
@@ -28,6 +28,7 @@ dependencies = [
     'assoc-scan',
     'einx>=0.3.0',
     'einops>=0.8.0',
+    'ema-pytorch',
     'hl-gauss-pytorch',
     'torch>=2.4',
     'tqdm',
