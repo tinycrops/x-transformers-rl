@@ -30,6 +30,7 @@ learner = Learner(
     state_dim = 5,
     num_actions = 2,
     reward_range = (-1., 1.),
+    max_timesteps = 10,
     world_model = dict(
         attn_dim_head = 16,
         heads = 4,

@@ -1,6 +1,6 @@
 [project]
 name = "x-transformers-rl"
-version = "0.0.5"
+version = "0.0.6"
 description = "X-Transformer for RL"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
@@ -32,7 +32,7 @@ dependencies = [
     'hl-gauss-pytorch',
     'torch>=2.4',
     'tqdm',
-    'x-transformers'
+    'x-transformers>=2.3.5'
 ]
 
 [project.urls]
