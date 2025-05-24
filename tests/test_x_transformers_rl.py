@@ -36,5 +36,5 @@ def test_e2e():
     agent = learner.agent
 
     hiddens = None
-    actions, hiddens = agent(np.random.randn(6), hiddens = hiddens)
-    actions, hiddens = agent(np.random.randn(6), hiddens = hiddens)
+    actions, hiddens = agent(np.random.randn(5), hiddens = hiddens)
+    actions, hiddens = agent(np.random.randn(5), hiddens = hiddens)

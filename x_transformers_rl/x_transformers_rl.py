@@ -22,7 +22,7 @@ from torch.nn.utils.rnn import pad_sequence
 pad_sequence = partial(pad_sequence, batch_first = True)
 
 import einx
-from einops import reduce, repeat, einsum, rearrange, pack
+from einops import reduce, repeat, einsum, rearrange, pack, unpack
 from einops.layers.torch import Rearrange
 
 from ema_pytorch import EMA
@@ -92,6 +92,15 @@ def temp_batch_dim(fn):
 
     return inner
 
+def pack_with_inverse(t, pattern):
+    packed, shapes = pack(t, pattern)
+
+    def inverse(out, inv_pattern = None):
+        inv_pattern = default(inv_pattern, pattern)
+        return unpack(out, shapes, inv_pattern)
+
+    return packed, inverse
+
 def from_numpy(
     t,
     dtype = torch.float32
@@ -122,6 +131,7 @@ class WorldModelActorCritic(Module):
         dim_pred_state,
         frac_actor_critic_head_gradient = 0.5,
         entropy_weight = 0.02,
+        reward_dropout = 0.5, # dropout the prev reward conditioning half the time, so the world model can still operate without previous rewards
         eps_clip = 0.2,
         value_clip = 0.4
     ):
@@ -129,7 +139,10 @@ class WorldModelActorCritic(Module):
         self.transformer = transformer
         dim = transformer.attn_layers.dim
 
+        self.reward_embed = nn.Parameter(torch.ones(dim) * 1e-2)
         self.action_embeds = nn.Embedding(num_actions, dim)
+
+        self.reward_dropout = nn.Dropout(reward_dropout)
 
         dim = transformer.attn_layers.dim
 
@@ -178,6 +191,12 @@ class WorldModelActorCritic(Module):
         # clipped value loss related
 
         self.value_clip = value_clip
+
+        self.register_buffer('dummy', tensor(0), persistent = False)
+
+    @property
+    def device(self):
+        return self.dummy.device
 
     def compute_autoregressive_loss(
         self,
@@ -256,10 +275,12 @@ class WorldModelActorCritic(Module):
         self,
         *args,
         actions = None,
+        rewards = None,
         next_actions = None,
         return_pred_dones = False,
         **kwargs
     ):
+        device = self.device
         sum_embeds = 0.
 
         if exists(actions):
@@ -268,6 +289,13 @@ class WorldModelActorCritic(Module):
             action_embeds = self.action_embeds(actions)
             action_embeds = einx.where('b n, b n d, ', has_actions, action_embeds, 0.)
             sum_embeds = sum_embeds + action_embeds
+
+        if exists(rewards):
+            reward_embeds = einx.multiply('..., d -> ... d', rewards, self.reward_embed)
+
+            maybe_dropout = self.reward_dropout(torch.ones((), device = device)) > 0.
+
+            sum_embeds = sum_embeds + reward_embeds * maybe_dropout.float()
 
         embed, cache = self.transformer(*args, **kwargs, sum_embeds = sum_embeds, return_embeddings = True, return_intermediates = True)
 
@@ -425,18 +453,16 @@ class Agent(Module):
 
         self.model_dim = hidden_dim
 
-        state_and_reward_dim = state_dim + 1
-
         self.model = WorldModelActorCritic(
             num_actions = num_actions,
             critic_dim_pred = critic_pred_num_bins,
             critic_min_max_value = reward_range,
-            dim_pred_state = state_and_reward_dim,
+            dim_pred_state = state_dim + 1,
             entropy_weight = beta_s,
             eps_clip = eps_clip,
             value_clip = value_clip,
             transformer = ContinuousTransformerWrapper(
-                dim_in = state_and_reward_dim,
+                dim_in = state_dim,
                 dim_out = None,
                 max_seq_len = max_timesteps,
                 probabilistic = True,
@@ -578,14 +604,17 @@ class Agent(Module):
 
                 rewards = F.pad(rewards, (1, -1), value = 0.)
 
-                states_with_rewards, _ = pack((states, rewards), 'b n *')
+                states_with_rewards, inverse_pack = pack_with_inverse((states, rewards), 'b n *')
 
                 with torch.no_grad():
                     self.rsmnorm.eval()
                     states_with_rewards = self.rsmnorm(states_with_rewards)
 
+                states, rewards = inverse_pack(states_with_rewards)
+
                 action_probs, values, states_with_rewards_pred, done_pred, _ = model(
-                    states_with_rewards,
+                    states,
+                    rewards = rewards,
                     actions = prev_actions,
                     next_actions = actions, # prediction of the next state needs to be conditioned on the agent's chosen action on that state, and will make the world model interactable
                     mask = mask,
@@ -641,6 +670,7 @@ class Agent(Module):
     def forward(
         self,
         state,
+        reward = None,
         hiddens = None
     ):
 
@@ -648,12 +678,23 @@ class Agent(Module):
         state = state.to(self.device)
         state = rearrange(state, 'd -> 1 1 d')
 
+        has_reward = exists(reward)
+
+        if not has_reward:
+            state = F.pad(state, (0, 1), value = 0.)
+
         with torch.no_grad():
             self.rsmnorm.eval()
-            normed_state = self.rsmnorm(state)
+            normed_state_with_reward = self.rsmnorm(state)
+
+        normed_state = normed_state_with_reward[..., :-1]
+
+        if has_reward:
+            reward = normed_state_with_reward[..., -1:]
 
         action_probs, *_, next_hiddens = self.model(
             normed_state,
+            rewards = reward,
             cache = hiddens,
         )
 
@@ -778,19 +819,21 @@ class Learner(Module):
             def state_to_pred_action_and_value(state, prev_action, prev_reward):
                 nonlocal world_model_cache
 
-                state_with_reward = cat((state, rearrange(prev_reward, '-> 1')), dim = -1)
+                state_with_reward, inverse_pack = pack_with_inverse((state, prev_reward), '*')
 
                 self.agent.rsmnorm.eval()
-                normed_state = self.agent.rsmnorm(state_with_reward)
+                normed_state_reward = self.agent.rsmnorm(state_with_reward)
+
+                normed_state, normed_reward = inverse_pack(normed_state_reward)
 
                 model.eval()
 
                 normed_state = rearrange(normed_state, 'd -> 1 1 d')
                 prev_action = rearrange(prev_action, ' -> 1 1')
-                prev_reward = rearrange(prev_reward, ' -> 1 1')
 
                 action_probs, values, _, _, world_model_cache = model.forward_eval(
                     normed_state,
+                    rewards = normed_reward,
                     cache = world_model_cache,
                     actions = prev_action
                 )
