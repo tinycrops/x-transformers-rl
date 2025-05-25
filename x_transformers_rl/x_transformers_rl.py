@@ -27,7 +27,7 @@ from einops.layers.torch import Rearrange
 
 from ema_pytorch import EMA
 
-from adam_atan2_pytorch import AdamAtan2
+from adam_atan2_pytorch import AdoptAtan2
 
 from hl_gauss_pytorch import HLGaussLoss
 
@@ -47,7 +47,6 @@ from x_transformers_rl.evolution import (
 # memory tuple
 
 Memory = namedtuple('Memory', [
-    'eps',
     'state',
     'action',
     'action_log_prob',
@@ -277,7 +276,6 @@ class WorldModelActorCritic(Module):
         actions = None,
         rewards = None,
         next_actions = None,
-        return_pred_dones = False,
         **kwargs
     ):
         device = self.device
@@ -484,7 +482,7 @@ class Agent(Module):
 
         self.ema_model = EMA(self.model, beta = ema_decay, include_online_model = False, **ema_kwargs)
 
-        self.optimizer = AdamAtan2(self.model.parameters(), lr = lr, betas = betas, regen_reg_rate = regen_reg_rate, cautious_factor = cautious_factor)
+        self.optimizer = AdoptAtan2(self.model.parameters(), lr = lr, betas = betas, regen_reg_rate = regen_reg_rate, cautious_factor = cautious_factor)
 
         self.max_grad_norm = max_grad_norm
 
@@ -540,7 +538,6 @@ class Agent(Module):
         memories = map(stack_memories, memories)
 
         (
-            episodes,
             states,
             actions,
             old_log_probs,
@@ -617,8 +614,7 @@ class Agent(Module):
                     rewards = rewards,
                     actions = prev_actions,
                     next_actions = actions, # prediction of the next state needs to be conditioned on the agent's chosen action on that state, and will make the world model interactable
-                    mask = mask,
-                    return_pred_dones = True
+                    mask = mask
                 )
 
                 # autoregressive loss for transformer world modeling - there's nothing better atm, even if deficient
@@ -799,8 +795,6 @@ class Learner(Module):
 
             one_episode_memories = deque([])
 
-            eps_tensor = tensor(eps)
-
             reset_out = env.reset(seed = seed)
 
             if isinstance(reset_out, tuple):
@@ -859,7 +853,7 @@ class Learner(Module):
                     next_state, reward, terminated = env_step_out
                     truncated = False
                 else:
-                    raise Error('invalid number of returns from environment .step')
+                    raise RuntimeError('invalid number of returns from environment .step')
 
                 next_state = from_numpy(next_state).to(device)
 
@@ -868,7 +862,7 @@ class Learner(Module):
                 prev_action = action
                 prev_reward = tensor(reward).to(device) # from the xval paper, we know pre-norm transformers can handle scaled tokens https://arxiv.org/abs/2310.02989
 
-                memory = Memory(tensor(eps), state, action, action_log_prob, tensor(reward), tensor(terminated), value)
+                memory = Memory(state, action, action_log_prob, tensor(reward), tensor(terminated), value)
 
                 one_episode_memories.append(memory)
 
@@ -885,7 +879,6 @@ class Learner(Module):
 
                     bootstrap_value_memory = memory._replace(
                         state = state,
-                        eps = tensor(-1),
                         is_boundary = tensor(True),
                         value = next_value
                     )
