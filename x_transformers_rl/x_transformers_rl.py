@@ -127,7 +127,7 @@ class WorldModelActorCritic(Module):
         num_actions,
         critic_dim_pred,
         critic_min_max_value: tuple[float, float],
-        dim_pred_state,
+        state_dim,
         frac_actor_critic_head_gradient = 0.5,
         entropy_weight = 0.02,
         reward_dropout = 0.5, # dropout the prev reward conditioning half the time, so the world model can still operate without previous rewards
@@ -145,21 +145,27 @@ class WorldModelActorCritic(Module):
 
         dim = transformer.attn_layers.dim
 
+        self.to_state_embed = nn.Linear(state_dim, dim)
+
         self.to_pred_done = nn.Sequential(
             nn.Linear(dim * 2, 1),
             Rearrange('... 1 -> ...'),
             nn.Sigmoid()            
         )
 
+        state_dim_and_reward = state_dim + 1
+
         self.to_pred = nn.Sequential(
             nn.Linear(dim * 2, dim),
             nn.SiLU(),
-            nn.Linear(dim, dim_pred_state * 2),
+            nn.Linear(dim, state_dim_and_reward * 2),
             Rearrange('... (mean_var d) -> mean_var ... d', mean_var = 2)
         )
 
+        actor_critic_input_dim = dim * 2  # gets the embedding from the world model as well as a direct projection from the state
+
         self.critic_head = nn.Sequential(
-            nn.Linear(dim, dim * 2),
+            nn.Linear(actor_critic_input_dim, dim * 2),
             nn.SiLU(),
             nn.Linear(dim * 2, critic_dim_pred)
         )
@@ -174,7 +180,7 @@ class WorldModelActorCritic(Module):
         )
 
         self.action_head = nn.Sequential(
-            nn.Linear(dim, dim * 2),
+            nn.Linear(actor_critic_input_dim, dim * 2),
             nn.SiLU(),
             nn.Linear(dim * 2, num_actions),
             nn.Softmax(dim = -1)
@@ -272,6 +278,7 @@ class WorldModelActorCritic(Module):
 
     def forward(
         self,
+        state,
         *args,
         actions = None,
         rewards = None,
@@ -280,6 +287,8 @@ class WorldModelActorCritic(Module):
     ):
         device = self.device
         sum_embeds = 0.
+
+        state_embed = self.to_state_embed(state)
 
         if exists(actions):
             has_actions = actions >= 0.
@@ -295,7 +304,14 @@ class WorldModelActorCritic(Module):
 
             sum_embeds = sum_embeds + reward_embeds * maybe_dropout.float()
 
-        embed, cache = self.transformer(*args, **kwargs, sum_embeds = sum_embeds, return_embeddings = True, return_intermediates = True)
+        embed, cache = self.transformer(
+            state,
+            *args,
+            **kwargs,
+            sum_embeds = sum_embeds,
+            return_embeddings = True,
+            return_intermediates = True
+        )
 
         # if `next_actions` from agent passed in, use it to predict the next state + truncated / terminated signal
 
@@ -319,13 +335,17 @@ class WorldModelActorCritic(Module):
 
         embed = frac_gradient(embed, self.frac_actor_critic_head_gradient) # what fraction of the gradient to pass back to the world model from the actor / critic head
 
+        # actor critic input
+
+        actor_critic_input = cat((embed, state_embed), dim = -1)
+
         # actions
 
-        action_probs = self.action_head(embed)
+        action_probs = self.action_head(actor_critic_input)
 
         # values
 
-        values = self.critic_head(embed)
+        values = self.critic_head(actor_critic_input)
 
         return action_probs, values, state_pred, dones, cache
 
@@ -455,7 +475,7 @@ class Agent(Module):
             num_actions = num_actions,
             critic_dim_pred = critic_pred_num_bins,
             critic_min_max_value = reward_range,
-            dim_pred_state = state_dim + 1,
+            state_dim = state_dim,
             entropy_weight = beta_s,
             eps_clip = eps_clip,
             value_clip = value_clip,
