@@ -1,10 +1,16 @@
 import torch
+from torch import nn
+from torch import cat, tensor
 from torch.nn import Module
 import torch.nn.functional as F
 
-from einops import reduce, rearrange, repeat
+from einops.layers.torch import Rearrange
+from einops import rearrange, repeat
 
 # functions
+
+def divisible_by(num, den):
+    return (num % den) == 0
 
 def l2norm(t):
     return F.normalize(t, dim = -1)
@@ -85,7 +91,6 @@ class LatentGenePool(Module):
         sorted_fitness, sorted_gene_ids = fitnesses.sort(dim = -1, descending = True)
 
         selected_gene_ids = sorted_gene_ids[:, :num_selected]
-        selected_fitness = sorted_fitness[:, :num_selected]
 
         selected_gene_ids_for_gather = repeat(selected_gene_ids, '... -> ... d', d = self.dim_gene)
 
