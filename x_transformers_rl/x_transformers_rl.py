@@ -167,6 +167,7 @@ class WorldModelActorCritic(Module):
         self.critic_head = nn.Sequential(
             nn.Linear(actor_critic_input_dim, dim * 2),
             nn.SiLU(),
+            nn.RMSNorm(dim * 2),
             nn.Linear(dim * 2, critic_dim_pred)
         )
 
@@ -182,6 +183,7 @@ class WorldModelActorCritic(Module):
         self.action_head = nn.Sequential(
             nn.Linear(actor_critic_input_dim, dim * 2),
             nn.SiLU(),
+            nn.RMSNorm(dim * 2),
             nn.Linear(dim * 2, num_actions),
             nn.Softmax(dim = -1)
         )
