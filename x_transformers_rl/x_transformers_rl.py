@@ -132,7 +132,9 @@ class WorldModelActorCritic(Module):
         entropy_weight = 0.02,
         reward_dropout = 0.5, # dropout the prev reward conditioning half the time, so the world model can still operate without previous rewards
         eps_clip = 0.2,
-        value_clip = 0.4
+        value_clip = 0.4,
+        evolutionary = False,
+        dim_latent_gene = None
     ):
         super().__init__()
         self.transformer = transformer
@@ -147,10 +149,12 @@ class WorldModelActorCritic(Module):
 
         self.to_state_embed = nn.Linear(state_dim, dim)
 
+        # world modeling related
+
         self.to_pred_done = nn.Sequential(
             nn.Linear(dim * 2, 1),
             Rearrange('... 1 -> ...'),
-            nn.Sigmoid()            
+            nn.Sigmoid()
         )
 
         state_dim_and_reward = state_dim + 1
@@ -162,12 +166,25 @@ class WorldModelActorCritic(Module):
             Rearrange('... (mean_var d) -> mean_var ... d', mean_var = 2)
         )
 
+        # evolutionary
+
+        self.evolutionary = evolutionary
+
+        if evolutionary:
+            assert exists(dim_latent_gene)
+            self.latent_to_embed = nn.Linear(dim_latent_gene, dim)
+
+        # actor critic
+
         actor_critic_input_dim = dim * 2  # gets the embedding from the world model as well as a direct projection from the state
+
+        if evolutionary:
+            actor_critic_input_dim += dim
 
         self.critic_head = nn.Sequential(
             nn.Linear(actor_critic_input_dim, dim * 2),
             nn.SiLU(),
-            nn.RMSNorm(dim * 2),
+            nn.LayerNorm(dim * 2, bias = False),
             nn.Linear(dim * 2, critic_dim_pred)
         )
 
@@ -183,7 +200,7 @@ class WorldModelActorCritic(Module):
         self.action_head = nn.Sequential(
             nn.Linear(actor_critic_input_dim, dim * 2),
             nn.SiLU(),
-            nn.RMSNorm(dim * 2),
+            nn.LayerNorm(dim * 2, bias = False),
             nn.Linear(dim * 2, num_actions),
             nn.Softmax(dim = -1)
         )
@@ -285,6 +302,7 @@ class WorldModelActorCritic(Module):
         actions = None,
         rewards = None,
         next_actions = None,
+        latent_gene = None,
         **kwargs
     ):
         device = self.device
@@ -340,6 +358,13 @@ class WorldModelActorCritic(Module):
         # actor critic input
 
         actor_critic_input = cat((embed, state_embed), dim = -1)
+
+        # maybe evolutionary
+
+        if self.evolutionary:
+            assert exists(latent_gene)
+            latent_embed = self.latent_to_embed(latent_gene)
+            actor_critic_input = cat((actor_critic_input, latent_embed), dim = -1)
 
         # actions
 
@@ -453,6 +478,13 @@ class Agent(Module):
         ema_decay,
         critic_pred_num_bins = 100,
         hidden_dim = 48,
+        evolutionary = False,
+        latent_gene_pool: dict = dict(
+            dim = 128,
+            num_genes_per_island = 3,
+            num_selected = 2,
+            tournament_size = 2
+        ),
         world_model: dict = dict(
             attn_dim_head = 16,
             heads = 4,
@@ -472,6 +504,11 @@ class Agent(Module):
         super().__init__()
 
         self.model_dim = hidden_dim
+
+        self.gene_pool = None
+
+        if evolutionary:
+            self.gene_pool = LatentGenePool(**latent_gene_pool)
 
         self.model = WorldModelActorCritic(
             num_actions = num_actions,
