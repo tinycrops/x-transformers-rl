@@ -170,7 +170,7 @@ class WorldModelActorCritic(Module):
             nn.Linear(dim * 2, critic_dim_pred)
         )
 
-         # https://arxiv.org/abs/2403.03950
+        # https://arxiv.org/abs/2403.03950
 
         self.critic_hl_gauss_loss = HLGaussLoss(
             min_value = critic_min_max_value[0],
@@ -498,7 +498,7 @@ class Agent(Module):
 
         # state + reward normalization
 
-        self.rsmnorm = RSNorm(state_dim + 1)
+        self.rsnorm = RSNorm(state_dim + 1)
 
         self.ema_model = EMA(self.model, beta = ema_decay, include_online_model = False, **ema_kwargs)
 
@@ -599,8 +599,8 @@ class Agent(Module):
 
         model.train()
 
-        rsmnorm_copy = deepcopy(self.rsmnorm) # learn the state normalization alongside in a copy of the state norm module, copy back at the end
-        rsmnorm_copy.train()
+        rsnorm_copy = deepcopy(self.rsnorm) # learn the state normalization alongside in a copy of the state norm module, copy back at the end
+        rsnorm_copy.train()
 
         for _ in range(self.epochs):
             for (
@@ -624,8 +624,8 @@ class Agent(Module):
                 states_with_rewards, inverse_pack = pack_with_inverse((states, rewards), 'b n *')
 
                 with torch.no_grad():
-                    self.rsmnorm.eval()
-                    states_with_rewards = self.rsmnorm(states_with_rewards)
+                    self.rsnorm.eval()
+                    states_with_rewards = self.rsnorm(states_with_rewards)
 
                 states, rewards = inverse_pack(states_with_rewards)
 
@@ -679,9 +679,9 @@ class Agent(Module):
                 self.optimizer.step()
                 self.optimizer.zero_grad()
 
-                rsmnorm_copy(states_with_rewards[mask])
+                rsnorm_copy(states_with_rewards[mask])
 
-        self.rsmnorm.load_state_dict(rsmnorm_copy.state_dict())
+        self.rsnorm.load_state_dict(rsnorm_copy.state_dict())
 
     def forward(
         self,
@@ -700,8 +700,8 @@ class Agent(Module):
             state = F.pad(state, (0, 1), value = 0.)
 
         with torch.no_grad():
-            self.rsmnorm.eval()
-            normed_state_with_reward = self.rsmnorm(state)
+            self.rsnorm.eval()
+            normed_state_with_reward = self.rsnorm(state)
 
         normed_state = normed_state_with_reward[..., :-1]
 
@@ -835,8 +835,8 @@ class Learner(Module):
 
                 state_with_reward, inverse_pack = pack_with_inverse((state, prev_reward), '*')
 
-                self.agent.rsmnorm.eval()
-                normed_state_reward = self.agent.rsmnorm(state_with_reward)
+                self.agent.rsnorm.eval()
+                normed_state_reward = self.agent.rsnorm(state_with_reward)
 
                 normed_state, normed_reward = inverse_pack(normed_state_reward)
 
