@@ -23,7 +23,7 @@ env = gym.wrappers.RecordVideo(
 
 state_dim = env.observation_space.shape[0]
 num_actions = env.action_space.n
-reward_range = (-100, 100)
+reward_range = (-5, 5)
 
 # world-model-actor-critic + learning wrapper
 
