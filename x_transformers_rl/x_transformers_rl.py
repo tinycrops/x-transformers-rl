@@ -349,11 +349,11 @@ class WorldModelActorCritic(Module):
 
         return action_probs, values, state_pred, dones, cache
 
-# RSM Norm (not to be confused with RMSNorm from transformers)
+# RS Norm (not to be confused with RMSNorm from transformers)
 # this was proposed by SimBa https://arxiv.org/abs/2410.09754
 # experiments show this to outperform other types of normalization
 
-class RSMNorm(Module):
+class RSNorm(Module):
     def __init__(
         self,
         dim,
@@ -362,7 +362,7 @@ class RSMNorm(Module):
         # equation (3) in https://arxiv.org/abs/2410.09754
         super().__init__()
         self.dim = dim
-        self.eps = 1e-5
+        self.eps = eps
 
         self.register_buffer('step', tensor(1))
         self.register_buffer('running_mean', torch.zeros(dim))
@@ -498,7 +498,7 @@ class Agent(Module):
 
         # state + reward normalization
 
-        self.rsmnorm = RSMNorm(state_dim + 1)
+        self.rsmnorm = RSNorm(state_dim + 1)
 
         self.ema_model = EMA(self.model, beta = ema_decay, include_online_model = False, **ema_kwargs)
 
@@ -928,7 +928,6 @@ class Learner(Module):
 
             if divisible_by(eps, self.save_every):
                 self.agent.save()
-
 
         self.agent.save()
 
