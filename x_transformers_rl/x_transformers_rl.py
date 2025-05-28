@@ -909,7 +909,7 @@ class Learner(Module):
         max_timesteps = default(max_timesteps, self.max_timesteps)
         num_episodes = ceil(num_episodes / self.update_episodes) * self.update_episodes
 
-        device = self.device
+        agent, device, is_main = self.agent, self.device, self.accelerator.is_main_process
 
         memories = deque([])
         episode_lens = []
@@ -921,41 +921,40 @@ class Learner(Module):
         time = 0
         num_policy_updates = 0
 
-        agent = self.agent
-
         agent.eval()
         model = agent.ema_model
 
         # maybe evolutionary
 
+        num_genes = 1
         fitnesses = None
+
         if agent.evolutionary:
             num_genes = agent.gene_pool.num_genes
 
             fitnesses = torch.zeros((num_genes,), device = device) # keeping track of fitness of each gene
-        else:
-            num_genes = 1
+
+            # episode seeds
+
+            episode_seeds = torch.randint(0, int(1e7), (num_episodes,))
+            episode_seeds = self.accelerator.reduce(episode_seeds)
 
         # interact with environment for experience
 
-        for eps in tqdm(range(num_episodes), desc = 'episodes'):
+        for episode in tqdm(range(num_episodes), desc = 'episodes', position = 0, disable = not is_main):
 
-            env_reset_kwargs = dict()
+            for gene_id in tqdm(range(num_genes), desc = 'gene', position = 1, disable = not is_main):
 
-            if agent.evolutionary:
-                episode_seed = torch.randint(0, int(1e7), (), device = device)
-                episode_seed = self.accelerator.reduce(episode_seed)
-                env_reset_kwargs.update(seed = episode_seed)
-
-            for gene_id in tqdm(range(num_genes), desc = 'gene'):
-
+                episode_seed = None
                 latent_gene = None
+
                 if agent.evolutionary:
                     latent_gene = agent.gene_pool[gene_id]
+                    episode_seed = episode_seeds[episode]
 
                 one_episode_memories = deque([])
 
-                reset_out = env.reset(**env_reset_kwargs)
+                reset_out = env.reset(seed = episode_seed)
 
                 if isinstance(reset_out, tuple):
                     state, *_ = reset_out
@@ -1085,7 +1084,7 @@ class Learner(Module):
                 memories.clear()
                 episode_lens.clear()
 
-            if divisible_by(eps, self.save_every):
+            if divisible_by(episode, self.save_every):
                 self.agent.save()
 
         self.agent.save()
