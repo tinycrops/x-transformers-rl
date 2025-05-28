@@ -847,6 +847,7 @@ class Learner(Module):
         reward_range,
         world_model: dict,
         evolutionary = False,
+        evolve_every = 10,
         latent_gene_pool: dict | None = None,
         max_timesteps = 500,
         batch_size = 8,
@@ -877,6 +878,7 @@ class Learner(Module):
             reward_range = reward_range,
             world_model = world_model,
             evolutionary = evolutionary,
+            evolve_every = evolve_every,
             latent_gene_pool = latent_gene_pool,
             epochs = epochs,
             max_timesteps = max_timesteps,
@@ -958,16 +960,17 @@ class Learner(Module):
 
             for gene_id in maybe_gene_tqdm(range(num_genes), desc = 'gene', position = 1, disable = not is_main):
 
-                episode_seed = None
                 latent_gene = None
+                reset_kwargs = dict()
 
                 if agent.evolutionary:
                     latent_gene = agent.gene_pool[gene_id]
                     episode_seed = episode_seeds[episode]
+                    reset_kwargs.update(seed = episode_seed.item())
 
                 one_episode_memories = deque([])
 
-                reset_out = env.reset(seed = episode_seed)
+                reset_out = env.reset(**reset_kwargs)
 
                 if isinstance(reset_out, tuple):
                     state, *_ = reset_out
