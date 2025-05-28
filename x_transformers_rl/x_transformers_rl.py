@@ -941,6 +941,7 @@ class Learner(Module):
 
         num_genes = 1
         fitnesses = None
+        maybe_gene_tqdm = identity
 
         if agent.evolutionary:
             num_genes = agent.gene_pool.num_genes
@@ -952,13 +953,13 @@ class Learner(Module):
             episode_seeds = torch.randint(0, int(1e7), (num_episodes,))
             episode_seeds = self.accelerator.reduce(episode_seeds)
 
+            maybe_gene_tqdm = tqdm
+
         # interact with environment for experience
 
         for episode in tqdm(range(num_episodes), desc = 'episodes', position = 0, disable = not is_main):
 
-            maybe_gene_tqdm = tqdm if agent.evolutionary else identity
-
-            for gene_id in maybe_gene_tqdm(range(num_genes), desc = 'gene', position = 1, disable = not is_main):
+            for gene_id in maybe_gene_tqdm(range(num_genes), desc = 'gene', position = 1, disable = not is_main, leave = False):
 
                 latent_gene = None
                 reset_kwargs = dict()
