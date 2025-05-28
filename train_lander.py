@@ -24,6 +24,7 @@ env = gym.wrappers.RecordVideo(
 state_dim = env.observation_space.shape[0]
 num_actions = env.action_space.n
 reward_range = (-5, 5)
+evolutionary = False
 
 # world-model-actor-critic + learning wrapper
 
@@ -33,6 +34,14 @@ learner = Learner(
     state_dim = state_dim,
     num_actions = num_actions,
     reward_range = reward_range,
+    evolutionary = evolutionary,
+    evolve_every = 5,
+    latent_gene_pool = dict(
+        dim = 32,
+        num_genes_per_island = 3,
+        num_selected = 2,
+        tournament_size = 2
+    ),
     world_model = dict(
         attn_dim_head = 16,
         heads = 4,
