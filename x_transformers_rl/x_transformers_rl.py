@@ -65,6 +65,9 @@ def exists(val):
 def default(v, d):
     return v if exists(v) else d
 
+def identity(t, *args, **kwargs):
+    return t
+
 def divisible_by(num, den):
     return (num % den) == 0
 
@@ -501,6 +504,7 @@ class Agent(Module):
         critic_pred_num_bins = 100,
         hidden_dim = 48,
         evolutionary = False,
+        evolve_every = 1,
         latent_gene_pool: dict = dict(
             dim = 128,
             num_genes_per_island = 3,
@@ -531,6 +535,7 @@ class Agent(Module):
         self.gene_pool = None
 
         self.evolutionary = evolutionary
+        self.evolve_every = evolve_every
 
         if evolutionary:
             self.gene_pool = LatentGenePool(**latent_gene_pool)
@@ -598,11 +603,11 @@ class Agent(Module):
 
         self.save_path = Path(save_path)
 
-        self.register_buffer('dummy', tensor(0), persistent = False)
+        self.register_buffer('step', tensor(0))
 
     @property
     def device(self):
-        return self.dummy.device
+        return self.step.device
 
     def save(self):
         torch.save({
@@ -777,12 +782,18 @@ class Agent(Module):
 
                 # finally update the gene pool, moving the fittest individual to the very left
 
-                if self.evolutionary and exists(fitnesses):
+                if (
+                    self.evolutionary and
+                    exists(fitnesses) and
+                    divisible_by(self.step.item(), self.evolve_every)
+                ):
                     self.gene_pool.evolve_(fitnesses)
 
                     fitnesses.zero_()
 
         self.rsnorm.load_state_dict(rsnorm_copy.state_dict())
+
+        self.step.add_(1)
 
     def forward(
         self,
@@ -943,7 +954,9 @@ class Learner(Module):
 
         for episode in tqdm(range(num_episodes), desc = 'episodes', position = 0, disable = not is_main):
 
-            for gene_id in tqdm(range(num_genes), desc = 'gene', position = 1, disable = not is_main):
+            maybe_gene_tqdm = tqdm if agent.evolutionary else identity
+
+            for gene_id in maybe_gene_tqdm(range(num_genes), desc = 'gene', position = 1, disable = not is_main):
 
                 episode_seed = None
                 latent_gene = None
