@@ -378,7 +378,12 @@ class WorldModelActorCritic(Module):
 
         if self.evolutionary:
             assert exists(latent_gene)
+
             latent_embed = self.latent_to_embed(latent_gene)
+
+            if latent_embed.ndim == 2:
+                latent_embed = repeat(latent_embed, 'b d -> b n d', n = actor_critic_input.shape[1])
+
             actor_critic_input = cat((actor_critic_input, latent_embed), dim = -1)
 
         # actions
@@ -538,6 +543,8 @@ class Agent(Module):
             entropy_weight = beta_s,
             eps_clip = eps_clip,
             value_clip = value_clip,
+            evolutionary = evolutionary,
+            dim_latent_gene = self.gene_pool.dim_gene if evolutionary else None,
             transformer = ContinuousTransformerWrapper(
                 dim_in = state_dim,
                 dim_out = None,
@@ -779,8 +786,14 @@ class Agent(Module):
         self,
         state,
         reward = None,
-        hiddens = None
+        hiddens = None,
+        latent_gene_id = 0
     ):
+
+        latent_gene = None
+        if self.evolutionary:
+            latent_gene = self.gene_pool[latent_gene_id]
+            latent_gene = rearrange(latent_gene, 'd -> 1 d')
 
         state = from_numpy(state)
         state = state.to(self.device)
@@ -803,6 +816,7 @@ class Agent(Module):
         action_probs, *_, next_hiddens = self.model(
             normed_state,
             rewards = reward,
+            latent_gene = latent_gene,
             cache = hiddens,
         )
 
@@ -966,9 +980,12 @@ class Learner(Module):
 
                     model.eval()
 
+                    if exists(latent_gene):
+                        latent_gene = rearrange(latent_gene, 'd -> 1 d')
+
                     normed_state = rearrange(normed_state, 'd -> 1 1 d')
                     prev_action = rearrange(prev_action, ' -> 1 1')
-
+                    
                     action_probs, values, _, _, world_model_cache = model.forward_eval(
                         normed_state,
                         rewards = normed_reward,
@@ -986,7 +1003,7 @@ class Learner(Module):
                 for timestep in range(max_timesteps):
                     time += 1
 
-                    action_probs, value = state_to_pred_action_and_value(state, prev_action, prev_reward)
+                    action_probs, value = state_to_pred_action_and_value(state, prev_action, prev_reward, latent_gene)
 
                     dist = Categorical(action_probs)
                     action = dist.sample()
@@ -1023,7 +1040,7 @@ class Learner(Module):
                     # take care of truncated by adding a non-learnable memory storing the next value for GAE
 
                     if done and not terminated:
-                        _, next_value, *_ = state_to_pred_action_and_value(state, prev_action, prev_reward)
+                        _, next_value, *_ = state_to_pred_action_and_value(state, prev_action, prev_reward, latent_gene)
 
                         bootstrap_value_memory = memory._replace(
                             state = state,
