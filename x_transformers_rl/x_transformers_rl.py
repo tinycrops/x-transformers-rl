@@ -780,6 +780,8 @@ class Agent(Module):
                 if self.evolutionary and exists(fitnesses):
                     self.gene_pool.evolve_(fitnesses)
 
+                    fitnesses.zero_()
+
         self.rsnorm.load_state_dict(rsnorm_copy.state_dict())
 
     def forward(
