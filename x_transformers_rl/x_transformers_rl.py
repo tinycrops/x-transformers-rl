@@ -12,6 +12,7 @@ from tqdm import tqdm
 
 import torch
 from torch import nn, tensor, is_tensor, cat, stack
+import torch.distributed as dist
 import torch.nn.functional as F
 from torch.nn import Module
 from torch.utils.data import TensorDataset, DataLoader
@@ -116,6 +117,19 @@ def from_numpy(
     if exists(dtype):
         t = t.type(dtype)
 
+    return t
+
+# distributed helpers
+
+def is_distributed():
+    return dist.is_initialized() and dist.get_world_size() > 1
+
+def maybe_distributed_mean(t):
+    if not is_distributed():
+        return t
+
+    dist.all_reduce(t)
+    t = t / dist.get_world_size()
     return t
 
 # world model + actor / critic in one
@@ -416,6 +430,8 @@ class RSNorm(Module):
         with torch.no_grad():
 
             new_obs_mean = reduce(x, '... d -> d', 'mean')
+            new_obs_mean = maybe_distributed_mean(new_obs_mean)
+
             delta = new_obs_mean - mean
 
             new_mean = mean + delta / time
@@ -499,7 +515,8 @@ class Agent(Module):
         ema_kwargs: dict = dict(
             update_model_with_ema_every = 1250
         ),
-        save_path = './ppo.pt'
+        save_path = './ppo.pt',
+        accelerator: Accelerator | None = None
     ):
         super().__init__()
 
@@ -547,6 +564,15 @@ class Agent(Module):
 
         self.ema_model.add_to_optimizer_post_step_hook(self.optimizer)
 
+        # accelerator
+
+        self.accelerator = accelerator
+
+        if not exists(accelerator):
+            self.clip_grad_norm_ = nn.utils.clip_grad_norm_
+        else:
+            self.clip_grad_norm_ = accelerator.clip_grad_norm_
+
         # learning hparams
 
         self.batch_size = batch_size
@@ -583,7 +609,8 @@ class Agent(Module):
 
     def learn(self, memories, episode_lens):
 
-        model = self.model
+        model, optimizer = self.model, self.optimizer
+
         hl_gauss = self.model.critic_hl_gauss_loss
 
         # retrieve and prepare data from memory for training - list[list[Memory]]
@@ -640,6 +667,11 @@ class Agent(Module):
 
         rsnorm_copy = deepcopy(self.rsnorm) # learn the state normalization alongside in a copy of the state norm module, copy back at the end
         rsnorm_copy.train()
+
+        # maybe wrap
+
+        if exists(self.accelerator):
+            model, optimizer, dl = self.accelerator.prepare(model, optimizer, dl)
 
         for _ in range(self.epochs):
             for (
@@ -711,9 +743,13 @@ class Agent(Module):
                 actor_critic_loss = (actor_loss + critic_loss)[mask]
 
                 loss = world_model_loss.mean() + actor_critic_loss.mean() + pred_done_loss.mean()
-                loss.backward()
 
-                torch.nn.utils.clip_grad_norm_(model.parameters(), self.max_grad_norm)
+                if exists(self.accelerator):
+                    self.accelerator.backward(loss)
+                else:
+                    loss.backward()
+
+                self.clip_grad_norm_(model.parameters(), self.max_grad_norm)
 
                 self.optimizer.step()
                 self.optimizer.zero_grad()
@@ -807,6 +843,7 @@ class Learner(Module):
             eps_clip = eps_clip,
             value_clip = value_clip,
             ema_decay = ema_decay,
+            accelerator = self.accelerator,
         )
 
         self.update_episodes = update_episodes
