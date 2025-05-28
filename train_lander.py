@@ -3,8 +3,9 @@
 import gymnasium as gym
 from shutil import rmtree
 
+evolutionary = False
 video_folder = './recordings'
-record_every = 250
+record_every = 250 * (3 if evolutionary else 1)
 
 env = gym.make(
     'LunarLander-v3',
@@ -24,7 +25,6 @@ env = gym.wrappers.RecordVideo(
 state_dim = env.observation_space.shape[0]
 num_actions = env.action_space.n
 reward_range = (-5, 5)
-evolutionary = False
 
 # world-model-actor-critic + learning wrapper
 
