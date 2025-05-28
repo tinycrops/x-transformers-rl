@@ -69,7 +69,7 @@ class LatentGenePool(Module):
         return l2norm(self.genes[idx])
 
     @torch.inference_mode()
-    def evolve(
+    def evolve_(
         self,
         fitnesses,
         temperature = 1.5

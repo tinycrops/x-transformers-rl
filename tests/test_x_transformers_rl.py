@@ -1,7 +1,10 @@
 import pytest
 import numpy as np
 
-def test_e2e():
+@pytest.mark.parametrize('evolutionary', (False, True))
+def test_e2e(
+    evolutionary
+):
     class Sim:
         def reset(self, seed = None):
             return np.random.randn(5) # state
@@ -22,6 +25,13 @@ def test_e2e():
         max_timesteps = 10,
         batch_size = 2,
         update_episodes = 2,
+        evolutionary = evolutionary,
+        latent_gene_pool = dict(
+            dim = 32,
+            num_genes_per_island = 3,
+            num_selected = 2,
+            tournament_size = 2
+        ),
         world_model = dict(
             attn_dim_head = 16,
             heads = 4,
