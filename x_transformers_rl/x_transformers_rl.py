@@ -160,6 +160,22 @@ def maybe_distributed_mean(t):
 
 # action related
 
+class SafeEmbedding(Module):
+    def __init__(
+        self,
+        num_tokens,
+        dim
+    ):
+        super().__init__()
+        self.embed = nn.Embedding(num_tokens, dim)
+
+    def forward(self, actions):
+        has_actions = actions >= 0.
+        actions = torch.where(has_actions, actions, 0)
+        embeds = self.embed(actions)
+        embeds = einx.where('b n, b n d, ', has_actions, embeds, 0.)
+        return embeds
+
 class Discrete:
     def __init__(
         self,
@@ -246,7 +262,7 @@ class WorldModelActorCritic(Module):
         self.reward_embed = nn.Parameter(torch.ones(dim) * 1e-2)
 
         if not continuous_actions:
-            self.action_embeds = nn.Embedding(num_actions, dim)
+            self.action_embeds = SafeEmbedding(num_actions, dim)
         else:
             self.action_embeds = nn.Linear(num_actions, dim)
 
@@ -301,8 +317,6 @@ class WorldModelActorCritic(Module):
             num_bins = critic_dim_pred,
             clamp_to_range = True
         )
-
-        self.is_discrete = not continuous_actions
 
         action_type_klass = Discrete if not continuous_actions else Continuous
 
@@ -425,15 +439,7 @@ class WorldModelActorCritic(Module):
         state_embed = self.to_state_embed(state)
 
         if exists(actions):
-            if self.is_discrete:
-                has_actions = actions >= 0.
-                actions = torch.where(has_actions, actions, 0)
-
             action_embeds = self.action_embeds(actions)
-
-            if self.is_discrete:
-                action_embeds = einx.where('b n, b n d, ', has_actions, action_embeds, 0.)
-
             sum_embeds = sum_embeds + action_embeds
 
         if exists(rewards):

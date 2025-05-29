@@ -2,8 +2,10 @@ import pytest
 import numpy as np
 
 @pytest.mark.parametrize('evolutionary', (False, True))
+@pytest.mark.parametrize('continuous_actions', (False, True))
 def test_e2e(
-    evolutionary
+    evolutionary,
+    continuous_actions
 ):
     class Sim:
         def reset(self, seed = None):
@@ -25,6 +27,7 @@ def test_e2e(
         max_timesteps = 10,
         batch_size = 2,
         update_episodes = 2,
+        continuous_actions = continuous_actions,
         evolutionary = evolutionary,
         latent_gene_pool = dict(
             dim = 32,
