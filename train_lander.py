@@ -40,6 +40,7 @@ learner = Learner(
     continuous_actions = continuous_actions,
     reward_range = reward_range,
     continuous_actions_clamp = continuous_actions_clamp,
+    squash_continuous = True,
     evolutionary = evolutionary,
     update_episodes = 64,
     evolve_every = 5,
@@ -58,7 +59,7 @@ learner = Learner(
         learned_value_residual_mix = True
     ),
     agent_kwargs = dict(
-        actor_loss_weight = 1e-1
+        actor_loss_weight = 0.5
     )
 )
 
