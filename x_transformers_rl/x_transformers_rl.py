@@ -207,16 +207,20 @@ class Continuous:
     def __init__(
         self,
         raw_actions: Tensor,
+        squash = False,
+        eps = 1e-5
     ):
         raw_actions = rearrange(raw_actions, '... (d muvar) -> ... d muvar', muvar = 2)
         self.raw_actions = raw_actions
 
         mean, log_variance = raw_actions.unbind(dim = -1)
-
         variance = log_variance.exp()
+        std = variance.clamp(min = eps).sqrt()
 
-        self.mean_variance = stack((mean, variance))
-        self.dist = Normal(mean, variance)
+        self.mean_variance = stack((mean, std))
+        self.dist = Normal(mean, std)
+
+        self.squash = squash
 
     @classmethod
     def Linear(
@@ -228,12 +232,24 @@ class Continuous:
         return nn.Linear(dim, num_actions * 2, bias = bias)
 
     def sample(self):
-        return self.dist.sample()
+        sampled = self.dist.sample()
+
+        if not self.squash:
+            return sampled
+
+        return sampled.tanh()
 
     def log_prob(self, value):
-        return self.dist.log_prob(value)
+        log_prob = self.dist.log_prob(value)
+
+        if not self.squash:
+            return log_prob
+
+        return log_prob - log(1. - value.pow(2))
 
     def entropy(self):
+        # forget about entropy for squashed gaussian for now, but plan on some monte carlo solution
+
         return self.dist.entropy()
 
 # world model + actor / critic in one
@@ -247,6 +263,7 @@ class WorldModelActorCritic(Module):
         critic_min_max_value: tuple[float, float],
         state_dim,
         continuous_actions = False,
+        squash_continuous = False,
         frac_actor_critic_head_gradient = 0.5,
         entropy_weight = 0.02,
         reward_dropout = 0.5, # dropout the prev reward conditioning half the time, so the world model can still operate without previous rewards
@@ -320,13 +337,16 @@ class WorldModelActorCritic(Module):
 
         action_type_klass = Discrete if not continuous_actions else Continuous
 
-        self.action_type_klass = action_type_klass
-
         self.action_head = nn.Sequential(
             nn.Linear(actor_critic_input_dim, dim * 2),
             nn.SiLU(),
             action_type_klass.Linear(dim * 2, num_actions)
         )
+
+        if continuous_actions and squash_continuous:
+            action_type_klass = partial(action_type_klass, squash = True)
+
+        self.action_type_klass = action_type_klass
 
         self.frac_actor_critic_head_gradient = frac_actor_critic_head_gradient
 
@@ -608,6 +628,7 @@ class Agent(Module):
         value_clip,
         ema_decay,
         continuous_actions = False,
+        squash_continuous = True,
         critic_pred_num_bins = 100,
         hidden_dim = 48,
         evolutionary = False,
@@ -653,6 +674,7 @@ class Agent(Module):
         self.model = WorldModelActorCritic(
             num_actions = num_actions,
             continuous_actions = continuous_actions,
+            squash_continuous = squash_continuous,
             critic_dim_pred = critic_pred_num_bins,
             critic_min_max_value = reward_range,
             state_dim = state_dim,
@@ -979,6 +1001,7 @@ class Learner(Module):
         reward_range,
         world_model: dict,
         continuous_actions = False,
+        squash_continuous = True,
         continuous_actions_clamp: tuple[float, float] | None = None,
         evolutionary = False,
         evolve_every = 10,
@@ -1011,6 +1034,7 @@ class Learner(Module):
             state_dim = state_dim,
             num_actions = num_actions,
             continuous_actions = continuous_actions,
+            squash_continuous = squash_continuous,
             reward_range = reward_range,
             world_model = world_model,
             evolutionary = evolutionary,
