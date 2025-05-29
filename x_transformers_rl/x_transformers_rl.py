@@ -209,10 +209,7 @@ class Continuous:
         num_actions,
         bias = True
     ) -> Module:
-        return nn.Sequential(
-            nn.RMSNorm(dim),
-            nn.Linear(dim, num_actions * 2, bias = bias)
-        )
+        return nn.Linear(dim, num_actions * 2, bias = bias)
 
     def sample(self):
         return self.dist.sample()
