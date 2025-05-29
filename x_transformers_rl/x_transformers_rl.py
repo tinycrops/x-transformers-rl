@@ -16,7 +16,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch.nn import Module
 from torch.utils.data import TensorDataset, DataLoader
-from torch.distributions import Categorical
+from torch.distributions import Categorical, Normal
 from torch.utils._pytree import tree_map
 
 from torch.nn.utils.rnn import pad_sequence
@@ -136,6 +136,71 @@ def maybe_distributed_mean(t):
     t = t / dist.get_world_size()
     return t
 
+# action related
+
+class Discrete:
+    def __init__(
+        self,
+        raw_actions: Tensor
+    ):
+        self.raw_actions = raw_actions
+        self.probs = raw_actions.softmax(dim = -1)
+        self.dist = Categorical(self.probs)
+
+    @classmethod
+    def Linear(
+        self,
+        dim,
+        num_actions,
+        bias = True
+    ) -> nn.Linear:
+        return nn.Linear(dim, num_actions, bias = bias)
+
+    def sample(self):
+        return self.dist.sample()
+
+    def log_prob(self, value):
+        return self.dist.log_prob(value)
+
+    def entropy(self):
+        return self.dist.entropy()
+
+class Continuous:
+    def __init__(
+        self,
+        raw_actions: Tensor
+    ):
+        raw_actions = rearrange(raw_actions, '... (d muvar) -> ... d muvar', muvar = 2)
+        self.raw_actions = raw_actions
+
+        mean, log_variance = raw_actions.unbind(dim = -1)
+        variance = log_variance.exp()
+
+        self.mean_variance = stack((mean, variance))
+        self.dist = Normal(mean, variance)
+
+    @classmethod
+    def Linear(
+        self,
+        dim,
+        num_actions,
+        bias = True
+    ) -> Module:
+
+        return nn.Sequential(
+            nn.LayerNorm(dim, bias = False),
+            nn.Linear(dim, num_actions * 2, bias = bias)
+        )
+
+    def sample(self):
+        return self.dist.sample()
+
+    def log_prob(self, value):
+        return self.dist.log_prob(value)
+
+    def entropy(self):
+        return self.dist.entropy()
+
 # world model + actor / critic in one
 
 class WorldModelActorCritic(Module):
@@ -146,6 +211,7 @@ class WorldModelActorCritic(Module):
         critic_dim_pred,
         critic_min_max_value: tuple[float, float],
         state_dim,
+        continuous_actions = False,
         frac_actor_critic_head_gradient = 0.5,
         entropy_weight = 0.02,
         reward_dropout = 0.5, # dropout the prev reward conditioning half the time, so the world model can still operate without previous rewards
@@ -159,7 +225,11 @@ class WorldModelActorCritic(Module):
         dim = transformer.attn_layers.dim
 
         self.reward_embed = nn.Parameter(torch.ones(dim) * 1e-2)
-        self.action_embeds = nn.Embedding(num_actions, dim)
+
+        if not continuous_actions:
+            self.action_embeds = nn.Embedding(num_actions, dim)
+        else:
+            self.action_embeds = nn.Linear(num_actions, dim)
 
         self.reward_dropout = nn.Dropout(reward_dropout)
 
@@ -180,8 +250,7 @@ class WorldModelActorCritic(Module):
         self.to_pred = nn.Sequential(
             nn.Linear(dim * 2, dim),
             nn.SiLU(),
-            nn.Linear(dim, state_dim_and_reward * 2),
-            Rearrange('... (mean_var d) -> mean_var ... d', mean_var = 2)
+            Continuous.Linear(dim, state_dim_and_reward)
         )
 
         # evolutionary
@@ -202,7 +271,6 @@ class WorldModelActorCritic(Module):
         self.critic_head = nn.Sequential(
             nn.Linear(actor_critic_input_dim, dim * 2),
             nn.SiLU(),
-            nn.LayerNorm(dim * 2, bias = False),
             nn.Linear(dim * 2, critic_dim_pred)
         )
 
@@ -215,12 +283,16 @@ class WorldModelActorCritic(Module):
             clamp_to_range = True
         )
 
+        self.is_discrete = not continuous_actions
+
+        action_type_klass = Discrete if not continuous_actions else Continuous
+
+        self.action_type_klass = action_type_klass
+
         self.action_head = nn.Sequential(
             nn.Linear(actor_critic_input_dim, dim * 2),
             nn.SiLU(),
-            nn.LayerNorm(dim * 2, bias = False),
-            nn.Linear(dim * 2, num_actions),
-            nn.Softmax(dim = -1)
+            action_type_klass.Linear(dim * 2, num_actions)
         )
 
         self.frac_actor_critic_head_gradient = frac_actor_critic_head_gradient
@@ -257,13 +329,13 @@ class WorldModelActorCritic(Module):
 
     def compute_actor_loss(
         self,
-        action_probs,
+        raw_actions,
         actions,
         old_log_probs,
         returns,
         old_values
     ):
-        dist = Categorical(action_probs)
+        dist = self.action_type_klass(raw_actions)
         action_log_probs = dist.log_prob(actions)
         entropy = dist.entropy()
 
@@ -272,12 +344,17 @@ class WorldModelActorCritic(Module):
         # calculate clipped surrogate objective, classic PPO loss
 
         ratios = (action_log_probs - old_log_probs).exp()
+        clipped_ratios = ratios.clamp(1 - self.eps_clip, 1 + self.eps_clip)
 
         advantages = normalize(returns - scalar_old_values.detach())
 
-        surr1 = ratios * advantages
-        surr2 = ratios.clamp(1 - self.eps_clip, 1 + self.eps_clip) * advantages
+        surr1 = einx.multiply('b n ..., b n ->  b n ...', ratios, advantages)
+        surr2 = einx.multiply('b n ..., b n ->  b n ...', clipped_ratios, advantages)
+
         actor_loss = - torch.min(surr1, surr2) - self.entropy_weight * entropy
+
+        actor_loss = reduce(actor_loss, 'b n ... -> b n', 'sum')
+
         return actor_loss
 
     def compute_critic_loss(
@@ -329,10 +406,15 @@ class WorldModelActorCritic(Module):
         state_embed = self.to_state_embed(state)
 
         if exists(actions):
-            has_actions = actions >= 0.
-            actions = torch.where(has_actions, actions, 0)
+            if self.is_discrete:
+                has_actions = actions >= 0.
+                actions = torch.where(has_actions, actions, 0)
+
             action_embeds = self.action_embeds(actions)
-            action_embeds = einx.where('b n, b n d, ', has_actions, action_embeds, 0.)
+
+            if self.is_discrete:
+                action_embeds = einx.where('b n, b n d, ', has_actions, action_embeds, 0.)
+
             sum_embeds = sum_embeds + action_embeds
 
         if exists(rewards):
@@ -364,9 +446,8 @@ class WorldModelActorCritic(Module):
         dones = None
 
         if exists(embed_with_actions):
-            state_mean, state_log_var = self.to_pred(embed_with_actions)
-
-            state_pred = stack((state_mean, state_log_var.exp()))
+            raw_state_pred = self.to_pred(embed_with_actions)
+            state_pred = Continuous(raw_state_pred).mean_variance
             dones = self.to_pred_done(embed_with_actions)
 
         # actor critic heads living on top of transformer - basically approaching online decision transformer except critic learn discounted returns
@@ -391,13 +472,13 @@ class WorldModelActorCritic(Module):
 
         # actions
 
-        action_probs = self.action_head(actor_critic_input)
+        raw_actions = self.action_head(actor_critic_input)
 
         # values
 
         values = self.critic_head(actor_critic_input)
 
-        return action_probs, values, state_pred, dones, cache
+        return raw_actions, values, state_pred, dones, cache
 
 # RS Norm (not to be confused with RMSNorm from transformers)
 # this was proposed by SimBa https://arxiv.org/abs/2410.09754
@@ -501,6 +582,7 @@ class Agent(Module):
         eps_clip,
         value_clip,
         ema_decay,
+        continuous_actions = False,
         critic_pred_num_bins = 100,
         hidden_dim = 48,
         evolutionary = False,
@@ -542,6 +624,7 @@ class Agent(Module):
 
         self.model = WorldModelActorCritic(
             num_actions = num_actions,
+            continuous_actions = continuous_actions,
             critic_dim_pred = critic_pred_num_bins,
             critic_min_max_value = reward_range,
             state_dim = state_dim,
@@ -567,11 +650,15 @@ class Agent(Module):
 
         self.frac_actor_critic_head_gradient = frac_actor_critic_head_gradient
 
+        # action related
+
+        self.continuous_actions = continuous_actions
+
         # state + reward normalization
 
         self.rsnorm = RSNorm(state_dim + 1)
 
-        self.ema_model = EMA(self.model, beta = ema_decay, include_online_model = False, **ema_kwargs)
+        self.ema_model = EMA(self.model, beta = ema_decay, include_online_model = False, forward_method_names = {'action_type_klass'}, **ema_kwargs)
 
         self.optimizer = AdoptAtan2(self.model.parameters(), lr = lr, betas = betas, regen_reg_rate = regen_reg_rate, cautious_factor = cautious_factor)
 
@@ -723,7 +810,7 @@ class Agent(Module):
 
                 states, rewards = inverse_pack(states_with_rewards)
 
-                action_probs, values, states_with_rewards_pred, done_pred, _ = model(
+                raw_actions, values, states_with_rewards_pred, done_pred, _ = model(
                     states,
                     rewards = rewards,
                     actions = prev_actions,
@@ -749,7 +836,7 @@ class Agent(Module):
                 # update actor and critic
 
                 actor_loss = model.compute_actor_loss(
-                    action_probs,
+                    raw_actions,
                     actions,
                     old_log_probs,
                     returns,
@@ -826,16 +913,16 @@ class Agent(Module):
         if has_reward:
             reward = normed_state_with_reward[..., -1:]
 
-        action_probs, *_, next_hiddens = self.model(
+        raw_actions, *_, next_hiddens = self.model(
             normed_state,
             rewards = reward,
             latent_gene = latent_gene,
             cache = hiddens,
         )
 
-        action_probs = rearrange(action_probs, '1 1 d -> d')
+        raw_actions = rearrange(raw_actions, '1 1 d -> d')
 
-        return action_probs, next_hiddens
+        return raw_actions, next_hiddens
 
 # main
 
@@ -846,6 +933,8 @@ class Learner(Module):
         num_actions,
         reward_range,
         world_model: dict,
+        continuous_actions = False,
+        continuous_actions_clamp: tuple[float, float] | None = None,
         evolutionary = False,
         evolve_every = 10,
         latent_gene_pool: dict | None = None,
@@ -875,6 +964,7 @@ class Learner(Module):
         self.agent = Agent(
             state_dim = state_dim,
             num_actions = num_actions,
+            continuous_actions = continuous_actions,
             reward_range = reward_range,
             world_model = world_model,
             evolutionary = evolutionary,
@@ -899,6 +989,12 @@ class Learner(Module):
         self.update_episodes = update_episodes
 
         self.max_timesteps = max_timesteps
+
+        # environment
+
+        self.num_actions = num_actions
+        self.continuous_actions = continuous_actions
+        self.continuous_actions_clamp = continuous_actions_clamp
 
         # saving agent
 
@@ -980,7 +1076,11 @@ class Learner(Module):
 
                 state = from_numpy(state).to(device)
 
-                prev_action = tensor(-1).to(device)
+                if self.continuous_actions:
+                    prev_action = torch.zeros((self.num_actions,), device = device)
+                else:
+                    prev_action = tensor(-1).to(device)
+
                 prev_reward = tensor(0.).to(device)
 
                 world_model_cache = None
@@ -1002,9 +1102,9 @@ class Learner(Module):
                         latent_gene = rearrange(latent_gene, 'd -> 1 d')
 
                     normed_state = rearrange(normed_state, 'd -> 1 1 d')
-                    prev_action = rearrange(prev_action, ' -> 1 1')
+                    prev_action = rearrange(prev_action, '... -> 1 1 ...')
                     
-                    action_probs, values, _, _, world_model_cache = model.forward_eval(
+                    raw_actions, values, _, _, world_model_cache = model.forward_eval(
                         normed_state,
                         rewards = normed_reward,
                         latent_gene = latent_gene,
@@ -1012,22 +1112,28 @@ class Learner(Module):
                         actions = prev_action
                     )
 
-                    action_probs = rearrange(action_probs, '1 1 d -> d')
+                    raw_actions = rearrange(raw_actions, '1 1 d -> d')
                     values = rearrange(values, '1 1 d -> d')
-                    return action_probs, values
+
+                    return model.action_type_klass(raw_actions), values
 
                 cumulative_rewards = 0.
 
                 for timestep in range(max_timesteps):
                     time += 1
 
-                    action_probs, value = state_to_pred_action_and_value(state, prev_action, prev_reward, latent_gene)
+                    dist, value = state_to_pred_action_and_value(state, prev_action, prev_reward, latent_gene)
 
-                    dist = Categorical(action_probs)
                     action = dist.sample()
                     action_log_prob = dist.log_prob(action)
 
-                    env_step_out = env.step(action.item())
+                    if self.continuous_actions and exists(self.continuous_actions_clamp):
+                        # environment clamping for now, before incorporating squashed gaussian etc
+
+                        clamp_min, clamp_max = self.continuous_actions_clamp
+                        action.clamp_(clamp_min, clamp_max)
+
+                    env_step_out = env.step(action.tolist())
 
                     if len(env_step_out) >= 4:
                         next_state, reward, terminated, truncated, *_ = env_step_out
