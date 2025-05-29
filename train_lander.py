@@ -56,6 +56,9 @@ learner = Learner(
         attn_gate_values = True,
         add_value_residual = True,
         learned_value_residual_mix = True
+    ),
+    agent_kwargs = dict(
+        actor_loss_weight = 1e-1
     )
 )
 
