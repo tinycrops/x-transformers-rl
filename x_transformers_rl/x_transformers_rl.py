@@ -93,6 +93,9 @@ def log(t, eps = 1e-20):
 def entropy(prob):
     return (-prob * log(prob)).sum()
 
+def softclamp(t, value):
+    return (t / value).tanh() * value
+
 def pad_at_dim(
     t,
     pad: tuple[int, int],
@@ -208,16 +211,20 @@ class Continuous:
         self,
         raw_actions: Tensor,
         squash = False,
-        eps = 1e-5
+        eps = 1e-5,
+        log_var_clamp_value = 6.
     ):
         raw_actions = rearrange(raw_actions, '... (d muvar) -> ... d muvar', muvar = 2)
         self.raw_actions = raw_actions
 
         mean, log_variance = raw_actions.unbind(dim = -1)
-        variance = log_variance.exp()
-        std = variance.clamp(min = eps).sqrt()
+        log_variance = softclamp(log_variance, log_var_clamp_value)
 
-        self.mean_variance = stack((mean, std))
+        variance = log_variance.exp()
+
+        self.mean_variance = stack((mean, variance))
+
+        std = variance.clamp(min = eps).sqrt()
         self.dist = Normal(mean, std)
 
         self.squash = squash
