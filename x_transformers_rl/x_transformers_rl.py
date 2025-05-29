@@ -26,6 +26,15 @@ import einx
 from einops import reduce, repeat, einsum, rearrange, pack, unpack
 from einops.layers.torch import Rearrange
 
+"""
+ein notation:
+
+b - batch
+n - sequence
+d - dimension
+a - actions
+"""
+
 from ema_pytorch import EMA
 
 from adam_atan2_pytorch import AdoptAtan2
