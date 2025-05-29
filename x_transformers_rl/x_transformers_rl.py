@@ -633,7 +633,10 @@ class Agent(Module):
             update_model_with_ema_every = 1250
         ),
         save_path = './ppo.pt',
-        accelerator: Accelerator | None = None
+        accelerator: Accelerator | None = None,
+        actor_loss_weight = 1.,
+        critic_loss_weight = 1.,
+        autoregressive_loss_weight = 1.
     ):
         super().__init__()
 
@@ -716,6 +719,12 @@ class Agent(Module):
         self.save_path = Path(save_path)
 
         self.register_buffer('step', tensor(0))
+
+        # loss weights
+
+        self.actor_loss_weight = actor_loss_weight
+        self.critic_loss_weight = critic_loss_weight
+        self.autoregressive_loss_weight = autoregressive_loss_weight
 
     @property
     def device(self):
@@ -881,9 +890,15 @@ class Agent(Module):
 
                 # add world modeling loss + ppo actor / critic loss
 
-                actor_critic_loss = (actor_loss + critic_loss)[mask]
+                actor_critic_loss = (
+                    actor_loss * self.actor_loss_weight +
+                    critic_loss * self.critic_loss_weight
+                )[mask]
 
-                loss = world_model_loss.mean() + actor_critic_loss.mean() + pred_done_loss.mean()
+                loss = (
+                    actor_critic_loss.mean() +
+                    (world_model_loss.mean() + pred_done_loss.mean()) * self.autoregressive_loss_weight
+                )
 
                 if exists(self.accelerator):
                     self.accelerator.backward(loss)
@@ -983,7 +998,8 @@ class Learner(Module):
         epochs = 4,
         ema_decay = 0.9,
         save_every = 100,
-        accelerate_kwargs: dict = dict()
+        accelerate_kwargs: dict = dict(),
+        agent_kwargs: dict = dict()
     ):
         super().__init__()
 
@@ -1014,6 +1030,7 @@ class Learner(Module):
             value_clip = value_clip,
             ema_decay = ema_decay,
             accelerator = self.accelerator,
+            **agent_kwargs
         )
         
         self.update_episodes = update_episodes
