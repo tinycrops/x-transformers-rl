@@ -1327,6 +1327,7 @@ class Learner(Module):
 
             memories.clear()
             episode_lens.clear()
+            gene_ids.clear()
 
             if divisible_by(learning_update, self.save_every):
                 self.agent.save()
