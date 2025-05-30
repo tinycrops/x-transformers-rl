@@ -26,7 +26,7 @@ def test_e2e(
         reward_range = (-1., 1.),
         max_timesteps = 10,
         batch_size = 2,
-        update_episodes = 2,
+        num_episodes_per_update = 2,
         continuous_actions = continuous_actions,
         evolutionary = evolutionary,
         latent_gene_pool = dict(
