@@ -212,12 +212,13 @@ class Continuous:
         raw_actions: Tensor,
         squash = False,
         eps = 1e-5,
-        log_var_clamp_value = 6.
+        log_var_clamp_value = 3.
     ):
         raw_actions = rearrange(raw_actions, '... (d muvar) -> ... d muvar', muvar = 2)
         self.raw_actions = raw_actions
 
         mean, log_variance = raw_actions.unbind(dim = -1)
+
         log_variance = softclamp(log_variance, log_var_clamp_value)
 
         variance = log_variance.exp()
@@ -255,7 +256,8 @@ class Continuous:
         return log_prob - log(1. - value.pow(2))
 
     def entropy(self):
-        # forget about entropy for squashed gaussian for now, but plan on some monte carlo solution
+
+        assert not self.squash
 
         return self.dist.entropy()
 
@@ -354,6 +356,7 @@ class WorldModelActorCritic(Module):
             action_type_klass = partial(action_type_klass, squash = True)
 
         self.action_type_klass = action_type_klass
+        self.squash_continuous = squash_continuous
 
         self.frac_actor_critic_head_gradient = frac_actor_critic_head_gradient
 
@@ -397,7 +400,8 @@ class WorldModelActorCritic(Module):
     ):
         dist = self.action_type_klass(raw_actions)
         action_log_probs = dist.log_prob(actions)
-        entropy = dist.entropy()
+
+        entropy = dist.entropy() if not self.squash_continuous else -action_log_probs
 
         scalar_old_values = self.critic_hl_gauss_loss(old_values)
 
@@ -702,7 +706,7 @@ class Agent(Module):
                     ff_dropout = dropout,
                     **world_model
                 )
-            )
+            ),
         )
 
         self.frac_actor_critic_head_gradient = frac_actor_critic_head_gradient
@@ -1028,6 +1032,7 @@ class Learner(Module):
         epochs = 4,
         ema_decay = 0.9,
         save_every = 100,
+        frac_actor_critic_head_gradient = 0.5,
         accelerate_kwargs: dict = dict(),
         agent_kwargs: dict = dict()
     ):
@@ -1060,6 +1065,7 @@ class Learner(Module):
             eps_clip = eps_clip,
             value_clip = value_clip,
             ema_decay = ema_decay,
+            frac_actor_critic_head_gradient = frac_actor_critic_head_gradient,
             accelerator = self.accelerator,
             **agent_kwargs
         )

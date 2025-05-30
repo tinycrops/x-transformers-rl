@@ -60,7 +60,8 @@ learner = Learner(
     ),
     agent_kwargs = dict(
         actor_loss_weight = 0.5
-    )
+    ),
+    frac_actor_critic_head_gradient = 1e-1
 )
 
 learner(env, 50000)
