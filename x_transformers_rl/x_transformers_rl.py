@@ -70,7 +70,6 @@ Memory = namedtuple('Memory', [
     'reward',
     'is_boundary',
     'value',
-    'latent_gene_id'
 ])
 
 def map_if_tensor(fn, args):
@@ -788,6 +787,7 @@ class Agent(Module):
         self,
         memories: list[list[Memory]],
         episode_lens,
+        gene_ids,
         fitnesses = None
     ):
 
@@ -811,8 +811,7 @@ class Agent(Module):
             old_log_probs,
             rewards,
             is_boundaries,
-            values,
-            gene_ids
+            values
         ) = tuple(map(pad_sequence, zip(*memories)))
 
         masks = ~is_boundaries
@@ -1142,6 +1141,7 @@ class Learner(Module):
 
         memories = deque([])
         episode_lens = []
+        gene_ids = []
 
         if exists(seed):
             torch.manual_seed(seed)
@@ -1269,7 +1269,7 @@ class Learner(Module):
                     prev_action = action
                     prev_reward = tensor(reward).to(device) # from the xval paper, we know pre-norm transformers can handle scaled tokens https://arxiv.org/abs/2310.02989
 
-                    memory = create_memory(state, action, action_log_prob, tensor(reward), tensor(terminated), value, tensor(gene_id))
+                    memory = create_memory(state, action, action_log_prob, tensor(reward), tensor(terminated), value)
 
                     one_episode_memories.append(memory)
 
@@ -1305,6 +1305,7 @@ class Learner(Module):
                 # add episode len for training world model actor critic
 
                 episode_lens.append(timestep + 1)
+                gene_ids.append(gene_id)
 
                 # add list[Memory] to all episode memories list[list[Memory]]
 
@@ -1320,6 +1321,7 @@ class Learner(Module):
             agent.learn(
                 memories,
                 tensor(episode_lens, device = device),
+                tensor(gene_ids, device = device),
                 fitnesses
             )
 
