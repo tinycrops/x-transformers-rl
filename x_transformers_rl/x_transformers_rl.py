@@ -1212,7 +1212,6 @@ class Learner(Module):
                     cumulative_rewards = 0.
 
                     for timestep in range(max_timesteps):
-                        time += 1
 
                         dist, value = state_to_pred_action_and_value(state, prev_action, prev_reward, latent_gene)
 
