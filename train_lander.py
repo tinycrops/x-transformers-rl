@@ -3,11 +3,11 @@
 import gymnasium as gym
 from shutil import rmtree
 
-evolutionary = False
-continuous_actions = True
+evolutionary = True
+continuous_actions = False
 
 video_folder = './recordings'
-record_every = 250 * (3 if evolutionary else 1)
+record_every = 64 * (3 if evolutionary else 1) * 3 # record every 3 learning updates
 
 env = gym.make(
     'LunarLander-v3',
@@ -42,7 +42,7 @@ learner = Learner(
     continuous_actions_clamp = continuous_actions_clamp,
     squash_continuous = True,
     evolutionary = evolutionary,
-    update_episodes = 64,
+    num_episodes_per_update = 64,
     evolve_every = 5,
     latent_gene_pool = dict(
         dim = 32,
@@ -64,4 +64,4 @@ learner = Learner(
     frac_actor_critic_head_gradient = 1e-1
 )
 
-learner(env, 50000)
+learner(env, 2500)
