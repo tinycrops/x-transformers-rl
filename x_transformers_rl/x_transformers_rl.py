@@ -991,9 +991,7 @@ class Agent(Module):
                 ):
                     self.gene_pool.evolve_(fitnesses)
 
-                    logs.update(fitnesses = fitnesses.clone())
-
-                    fitnesses.zero_()
+                    logs.update(fitnesses = fitnesses)
 
                 self.accelerator.log(logs)
 
