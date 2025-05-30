@@ -17,10 +17,10 @@ def default(val, d):
 def divisible_by(num, den):
     return (num % den) == 0
 
-def pad_dim_to(t, length, dim = 0):
+def pad_dim_to(t, length, dim = 0, value = 0):
     pad_length = length - t.shape[dim]
     zero_pairs = (-dim - 1) if dim < 0 else (t.ndim - dim - 1)
-    return F.pad(t, (*((0, 0) * zero_pairs), 0, pad_length))
+    return F.pad(t, (*((0, 0) * zero_pairs), 0, pad_length), value = value)
 
 def is_distributed():
     return dist.is_initialized() and dist.get_world_size() > 1
@@ -30,6 +30,14 @@ def get_world_and_rank():
         return 1, 0
 
     return dist.get_world_size(), dist.get_rank()
+
+def maybe_distributed_mean(t):
+    if not is_distributed():
+        return t
+
+    dist.all_reduce(t)
+    t = t / dist.get_world_size()
+    return t
 
 def maybe_sync_seed(device, max_size = int(1e6)):
     rand_int = torch.randint(0, max_size, (), device = device)
@@ -56,6 +64,11 @@ def gather_sizes(t, *, dim):
     size = torch.tensor(t.shape[dim], device = t.device, dtype = torch.long)
     sizes = all_gather_same_dim(size)
     return torch.stack(sizes)
+
+def gather_sizes_and_pad_to(t, *, dim, value = 0):
+    sizes = gather_sizes(t, dim = dim)
+    max_size = sizes.amax().item()
+    return  pad_dim_to(t, max_size, dim = dim, value = value)
 
 def has_only_one_value(t):
     return (t == t[0]).all()

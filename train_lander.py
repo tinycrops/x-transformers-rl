@@ -6,23 +6,10 @@ from shutil import rmtree
 evolutionary = True
 continuous_actions = False
 
-video_folder = './recordings'
-record_every = 64 * (3 if evolutionary else 1) * 3 # record every 3 learning updates
-
 env = gym.make(
     'LunarLander-v3',
     render_mode = 'rgb_array',
     continuous = continuous_actions
-)
-
-rmtree(video_folder, ignore_errors = True)
-
-env = gym.wrappers.RecordVideo(
-    env = env,
-    video_folder = video_folder,
-    name_prefix = 'lunar-video',
-    episode_trigger = lambda eps_num: (eps_num % record_every) == 0,
-    disable_logger = True
 )
 
 state_dim = env.observation_space.shape[0]
@@ -42,6 +29,7 @@ learner = Learner(
     continuous_actions_clamp = continuous_actions_clamp,
     squash_continuous = True,
     evolutionary = evolutionary,
+    batch_size = 8,
     num_episodes_per_update = 64,
     evolve_every = 5,
     latent_gene_pool = dict(
@@ -63,5 +51,19 @@ learner = Learner(
     ),
     frac_actor_critic_head_gradient = 1e-1
 )
+
+if learner.accelerator.is_main_process:
+
+    video_folder = './recordings'
+    record_every = len(learner.episode_genes_for_process) * 2 # record every 2 learning updates
+    rmtree(video_folder, ignore_errors = True)
+
+    env = gym.wrappers.RecordVideo(
+        env = env,
+        video_folder = video_folder,
+        name_prefix = 'lunar-video',
+        episode_trigger = lambda eps_num: (eps_num % record_every) == 0,
+        disable_logger = True
+    )
 
 learner(env, 2500)
