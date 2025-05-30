@@ -7,6 +7,11 @@ import torch.nn.functional as F
 from einops.layers.torch import Rearrange
 from einops import rearrange, repeat
 
+from x_transformers_rl.distributed import (
+    is_distributed,
+    maybe_sync_seed
+)
+
 # functions
 
 def divisible_by(num, den):
@@ -72,10 +77,15 @@ class LatentGenePool(Module):
     def evolve_(
         self,
         fitnesses,
-        temperature = 1.5
+        temperature = 1.5,
+        sync_seed = True
     ):
         device, num_selected = fitnesses.device, self.num_selected
         assert fitnesses.ndim == 1 and fitnesses.shape[0] == self.num_genes
+
+        if is_distributed():
+            seed = maybe_sync_seed(device)
+            torch.manual_seed(seed)
 
         # split out the islands
 
