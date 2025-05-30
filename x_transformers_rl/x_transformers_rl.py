@@ -756,6 +756,7 @@ class Agent(Module):
         self.save_path = Path(save_path)
 
         self.register_buffer('step', tensor(0))
+        self.to(accelerator.device)
 
         # loss weights
 
@@ -855,15 +856,15 @@ class Agent(Module):
 
         dl = DataLoader(dataset, batch_size = self.batch_size, shuffle = True)
 
-        model.train()
-
         rsnorm_copy = deepcopy(self.rsnorm) # learn the state normalization alongside in a copy of the state norm module, copy back at the end
-        rsnorm_copy.train()
 
         # maybe wrap
 
         if exists(self.accelerator):
-            wrapped_model, optimizer, dl = self.accelerator.prepare(model, optimizer, dl)
+            wrapped_model, wrapped_rsnorm_copy, optimizer, dl = self.accelerator.prepare(model, rsnorm_copy, optimizer, dl)
+
+        wrapped_model.train()
+        wrapped_rsnorm_copy.train()
 
         for _ in range(self.epochs):
             for (
@@ -959,12 +960,27 @@ class Agent(Module):
                 else:
                     loss.backward()
 
-                self.clip_grad_norm_(model.parameters(), self.max_grad_norm)
+                # gradient clipping
 
-                self.optimizer.step()
-                self.optimizer.zero_grad()
+                self.clip_grad_norm_(wrapped_model.parameters(), self.max_grad_norm)
 
-                rsnorm_copy(states_with_rewards[mask])
+                # update
+
+                optimizer.step()
+                optimizer.zero_grad()
+
+                # log losses
+
+                logs = dict(
+                    actor_loss = actor_loss.mean(),
+                    critic_loss = critic_loss.mean(),
+                    autoreg_loss = world_model_loss.mean(),
+                    pred_done_loss = pred_done_loss.mean()
+                )
+
+                # update state norm
+
+                wrapped_rsnorm_copy(states_with_rewards[mask])
 
                 # finally update the gene pool, moving the fittest individual to the very left
 
@@ -975,7 +991,11 @@ class Agent(Module):
                 ):
                     self.gene_pool.evolve_(fitnesses)
 
+                    logs.update(fitnesses = fitnesses.clone())
+
                     fitnesses.zero_()
+
+                self.accelerator.log(logs)
 
         self.rsnorm.load_state_dict(rsnorm_copy.state_dict())
 
