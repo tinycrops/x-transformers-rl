@@ -1120,9 +1120,6 @@ class Learner(Module):
             torch.manual_seed(seed)
             np.random.seed(seed)
 
-        time = 0
-        num_policy_updates = 0
-
         agent.eval()
         model = agent.ema_model
 
@@ -1294,8 +1291,6 @@ class Learner(Module):
                 tensor(episode_lens, device = device),
                 fitnesses
             )
-
-            num_policy_updates += 1
 
             memories.clear()
             episode_lens.clear()
