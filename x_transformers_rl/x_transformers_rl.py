@@ -66,6 +66,13 @@ Memory = namedtuple('Memory', [
     'latent_gene_id'
 ])
 
+def map_if_tensor(fn, args):
+    return tree_map(lambda t: fn(t) if is_tensor(t) else t, args)
+
+def create_memory(*args) -> Memory:
+    args = map_if_tensor(lambda t: t.cpu(), args)
+    return Memory(*args)
+
 # helpers
 
 def exists(val):
@@ -764,6 +771,9 @@ class Agent(Module):
         return self.step.device
 
     def save(self):
+        if not self.accelerator.is_main_process:
+            return
+
         torch.save({
             'model': self.model.state_dict(),
         }, str(self.save_path))
@@ -1019,7 +1029,7 @@ class Learner(Module):
         latent_gene_pool: dict | None = None,
         max_timesteps = 500,
         batch_size = 8,
-        update_episodes = 64,
+        num_episodes_per_update = 64,
         lr = 0.0008,
         betas = (0.9, 0.99),
         lam = 0.95,
@@ -1038,7 +1048,7 @@ class Learner(Module):
     ):
         super().__init__()
 
-        assert divisible_by(update_episodes, batch_size)
+        assert divisible_by(num_episodes_per_update, batch_size)
 
         self.accelerator = Accelerator(**accelerate_kwargs)
 
@@ -1070,7 +1080,7 @@ class Learner(Module):
             **agent_kwargs
         )
         
-        self.update_episodes = update_episodes
+        self.num_episodes_per_update = num_episodes_per_update
 
         self.max_timesteps = max_timesteps
 
@@ -1095,14 +1105,13 @@ class Learner(Module):
     def forward(
         self,
         env: object,
-        num_episodes: int,
+        num_learning_updates: int,
         seed = None,
         max_timesteps = None
     ):
         max_timesteps = default(max_timesteps, self.max_timesteps)
-        num_episodes = ceil(num_episodes / self.update_episodes) * self.update_episodes
 
-        agent, device, is_main = self.agent, self.device, self.accelerator.is_main_process
+        agent, device, num_episodes_per_update, is_main = self.agent, self.device, self.num_episodes_per_update, self.accelerator.is_main_process
 
         memories = deque([])
         episode_lens = []
@@ -1123,175 +1132,175 @@ class Learner(Module):
         fitnesses = None
         maybe_gene_tqdm = identity
 
-        if agent.evolutionary:
-            num_genes = agent.gene_pool.num_genes
-
-            fitnesses = torch.zeros((num_genes,), device = device) # keeping track of fitness of each gene
-
-            # episode seeds
-
-            episode_seeds = torch.randint(0, int(1e7), (num_episodes,))
-            episode_seeds = self.accelerator.reduce(episode_seeds)
-
-            maybe_gene_tqdm = tqdm
-
         # interact with environment for experience
 
-        for episode in tqdm(range(num_episodes), desc = 'episodes', position = 0, disable = not is_main):
+        for learning_update in tqdm(range(num_learning_updates), desc = 'updates', position = 0, disable = not is_main):
 
-            for gene_id in maybe_gene_tqdm(range(num_genes), desc = 'gene', position = 1, disable = not is_main, leave = False):
+            if agent.evolutionary:
+                num_genes = agent.gene_pool.num_genes
 
-                latent_gene = None
-                reset_kwargs = dict()
+                fitnesses = torch.zeros((num_genes,), device = device) # keeping track of fitness of each gene
 
-                if agent.evolutionary:
-                    latent_gene = agent.gene_pool[gene_id]
-                    episode_seed = episode_seeds[episode]
-                    reset_kwargs.update(seed = episode_seed.item())
+                # episode seeds
 
-                one_episode_memories = deque([])
+                episode_seeds = torch.randint(0, int(1e7), (num_episodes_per_update,))
+                episode_seeds = self.accelerator.reduce(episode_seeds)
 
-                reset_out = env.reset(**reset_kwargs)
+                maybe_gene_tqdm = tqdm
 
-                if isinstance(reset_out, tuple):
-                    state, *_ = reset_out
-                else:
-                    state = reset_out
+            for episode in tqdm(range(num_episodes_per_update), desc = 'episodes', position = 1, disable = not is_main, leave = False):
 
-                state = from_numpy(state).to(device)
+                for gene_id in maybe_gene_tqdm(range(num_genes), desc = 'gene', position = 2, disable = not is_main, leave = False):
 
-                if self.continuous_actions:
-                    prev_action = torch.zeros((self.num_actions,), device = device)
-                else:
-                    prev_action = tensor(-1).to(device)
+                    latent_gene = None
+                    reset_kwargs = dict()
 
-                prev_reward = tensor(0.).to(device)
+                    if agent.evolutionary:
+                        latent_gene = agent.gene_pool[gene_id]
+                        episode_seed = episode_seeds[episode]
+                        reset_kwargs.update(seed = episode_seed.item())
 
-                world_model_cache = None
+                    one_episode_memories = deque([])
 
-                @torch.no_grad()
-                def state_to_pred_action_and_value(state, prev_action, prev_reward, latent_gene = None):
-                    nonlocal world_model_cache
+                    reset_out = env.reset(**reset_kwargs)
 
-                    state_with_reward, inverse_pack = pack_with_inverse((state, prev_reward), '*')
-
-                    self.agent.rsnorm.eval()
-                    normed_state_reward = self.agent.rsnorm(state_with_reward)
-
-                    normed_state, normed_reward = inverse_pack(normed_state_reward)
-
-                    model.eval()
-
-                    if exists(latent_gene):
-                        latent_gene = rearrange(latent_gene, 'd -> 1 d')
-
-                    normed_state = rearrange(normed_state, 'd -> 1 1 d')
-                    prev_action = rearrange(prev_action, '... -> 1 1 ...')
-                    
-                    raw_actions, values, _, _, world_model_cache = model.forward_eval(
-                        normed_state,
-                        rewards = normed_reward,
-                        latent_gene = latent_gene,
-                        cache = world_model_cache,
-                        actions = prev_action
-                    )
-
-                    raw_actions = rearrange(raw_actions, '1 1 d -> d')
-                    values = rearrange(values, '1 1 d -> d')
-
-                    return model.action_type_klass(raw_actions), values
-
-                cumulative_rewards = 0.
-
-                for timestep in range(max_timesteps):
-                    time += 1
-
-                    dist, value = state_to_pred_action_and_value(state, prev_action, prev_reward, latent_gene)
-
-                    action = dist.sample()
-                    action_log_prob = dist.log_prob(action)
-
-                    if self.continuous_actions and exists(self.continuous_actions_clamp):
-                        # environment clamping for now, before incorporating squashed gaussian etc
-
-                        clamp_min, clamp_max = self.continuous_actions_clamp
-                        action.clamp_(clamp_min, clamp_max)
-
-                    env_step_out = env.step(action.tolist())
-
-                    if len(env_step_out) >= 4:
-                        next_state, reward, terminated, truncated, *_ = env_step_out
-                    elif len(env_step_out) == 3:
-                        next_state, reward, terminated = env_step_out
-                        truncated = False
+                    if isinstance(reset_out, tuple):
+                        state, *_ = reset_out
                     else:
-                        raise RuntimeError('invalid number of returns from environment .step')
+                        state = reset_out
 
-                    next_state = from_numpy(next_state).to(device)
+                    state = from_numpy(state).to(device)
 
-                    reward = float(reward)
-                    cumulative_rewards += reward
+                    if self.continuous_actions:
+                        prev_action = torch.zeros((self.num_actions,), device = device)
+                    else:
+                        prev_action = tensor(-1).to(device)
 
-                    prev_action = action
-                    prev_reward = tensor(reward).to(device) # from the xval paper, we know pre-norm transformers can handle scaled tokens https://arxiv.org/abs/2310.02989
+                    prev_reward = tensor(0.).to(device)
 
-                    memory = Memory(state, action, action_log_prob, tensor(reward), tensor(terminated), value, tensor(gene_id))
+                    world_model_cache = None
 
-                    one_episode_memories.append(memory)
+                    @torch.no_grad()
+                    def state_to_pred_action_and_value(state, prev_action, prev_reward, latent_gene = None):
+                        nonlocal world_model_cache
 
-                    state = next_state
+                        state_with_reward, inverse_pack = pack_with_inverse((state, prev_reward), '*')
 
-                    # determine if truncating or terminated
+                        self.agent.rsnorm.eval()
+                        normed_state_reward = self.agent.rsnorm(state_with_reward)
 
-                    done = terminated or truncated
+                        normed_state, normed_reward = inverse_pack(normed_state_reward)
 
-                    # take care of truncated by adding a non-learnable memory storing the next value for GAE
+                        model.eval()
 
-                    if done and not terminated:
-                        _, next_value, *_ = state_to_pred_action_and_value(state, prev_action, prev_reward, latent_gene)
+                        if exists(latent_gene):
+                            latent_gene = rearrange(latent_gene, 'd -> 1 d')
 
-                        bootstrap_value_memory = memory._replace(
-                            state = state,
-                            is_boundary = tensor(True),
-                            value = next_value
+                        normed_state = rearrange(normed_state, 'd -> 1 1 d')
+                        prev_action = rearrange(prev_action, '... -> 1 1 ...')
+                        
+                        raw_actions, values, _, _, world_model_cache = model.forward_eval(
+                            normed_state,
+                            rewards = normed_reward,
+                            latent_gene = latent_gene,
+                            cache = world_model_cache,
+                            actions = prev_action
                         )
 
-                        memories.append(bootstrap_value_memory)
+                        raw_actions = rearrange(raw_actions, '1 1 d -> d')
+                        values = rearrange(values, '1 1 d -> d')
 
-                    # break if done
+                        return model.action_type_klass(raw_actions), values
 
-                    if done:
-                        break
+                    cumulative_rewards = 0.
 
-                # add cumulative reward entry for fitness calculation
+                    for timestep in range(max_timesteps):
+                        time += 1
 
-                if agent.evolutionary:
-                    fitnesses[gene_id] += cumulative_rewards
+                        dist, value = state_to_pred_action_and_value(state, prev_action, prev_reward, latent_gene)
 
-                # add episode len for training world model actor critic
+                        action = dist.sample()
+                        action_log_prob = dist.log_prob(action)
 
-                episode_lens.append(timestep + 1)
+                        if self.continuous_actions and exists(self.continuous_actions_clamp):
+                            # environment clamping for now, before incorporating squashed gaussian etc
 
-                # add list[Memory] to all episode memories list[list[Memory]]
+                            clamp_min, clamp_max = self.continuous_actions_clamp
+                            action.clamp_(clamp_min, clamp_max)
 
-                memories.append(one_episode_memories)
+                        env_step_out = env.step(action.tolist())
+
+                        if len(env_step_out) >= 4:
+                            next_state, reward, terminated, truncated, *_ = env_step_out
+                        elif len(env_step_out) == 3:
+                            next_state, reward, terminated = env_step_out
+                            truncated = False
+                        else:
+                            raise RuntimeError('invalid number of returns from environment .step')
+
+                        next_state = from_numpy(next_state).to(device)
+
+                        reward = float(reward)
+                        cumulative_rewards += reward
+
+                        prev_action = action
+                        prev_reward = tensor(reward).to(device) # from the xval paper, we know pre-norm transformers can handle scaled tokens https://arxiv.org/abs/2310.02989
+
+                        memory = create_memory(state, action, action_log_prob, tensor(reward), tensor(terminated), value, tensor(gene_id))
+
+                        one_episode_memories.append(memory)
+
+                        state = next_state
+
+                        # determine if truncating or terminated
+
+                        done = terminated or truncated
+
+                        # take care of truncated by adding a non-learnable memory storing the next value for GAE
+
+                        if done and not terminated:
+                            _, next_value, *_ = state_to_pred_action_and_value(state, prev_action, prev_reward, latent_gene)
+
+                            bootstrap_value_memory = memory._replace(
+                                state = state,
+                                is_boundary = tensor(True),
+                                value = next_value
+                            )
+
+                            memories.append(bootstrap_value_memory)
+
+                        # break if done
+
+                        if done:
+                            break
+
+                    # add cumulative reward entry for fitness calculation
+
+                    if agent.evolutionary:
+                        fitnesses[gene_id] += cumulative_rewards
+
+                    # add episode len for training world model actor critic
+
+                    episode_lens.append(timestep + 1)
+
+                    # add list[Memory] to all episode memories list[list[Memory]]
+
+                    memories.append(one_episode_memories)
 
             # updating of the agent
 
-            if divisible_by(len(memories), self.update_episodes):
+            self.agent.learn(
+                memories,
+                tensor(episode_lens, device = device),
+                fitnesses
+            )
 
-                self.agent.learn(
-                    memories,
-                    tensor(episode_lens, device = device),
-                    fitnesses
-                )
+            num_policy_updates += 1
 
-                num_policy_updates += 1
+            memories.clear()
+            episode_lens.clear()
 
-                memories.clear()
-                episode_lens.clear()
-
-            if divisible_by(episode, self.save_every):
+            if divisible_by(learning_update, self.save_every):
                 self.agent.save()
 
         self.agent.save()
