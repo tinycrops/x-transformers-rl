@@ -372,7 +372,7 @@ class WorldModelActorCritic(Module):
             action_type_klass = partial(action_type_klass, squash = True)
 
         self.action_type_klass = action_type_klass
-        self.squash_continuous = squash_continuous
+        self.squash_continuous = squash_continuous and continuous_actions
 
         self.frac_actor_critic_head_gradient = frac_actor_critic_head_gradient
 
