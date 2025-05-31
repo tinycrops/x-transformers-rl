@@ -4,7 +4,7 @@ import gymnasium as gym
 from shutil import rmtree
 
 evolutionary = True
-continuous_actions = True
+continuous_actions = False
 
 env = gym.make(
     'LunarLander-v3',

@@ -295,6 +295,7 @@ class WorldModelActorCritic(Module):
         value_clip = 0.4,
         evolutionary = False,
         dim_latent_gene = None,
+        normalize_advantages = True
     ):
         super().__init__()
         self.transformer = transformer
@@ -375,6 +376,10 @@ class WorldModelActorCritic(Module):
 
         self.frac_actor_critic_head_gradient = frac_actor_critic_head_gradient
 
+        # advantage normalization
+
+        self.maybe_normalize = normalize if normalize_advantages else identity
+
         # ppo loss related
 
         self.eps_clip = eps_clip
@@ -427,10 +432,10 @@ class WorldModelActorCritic(Module):
         clipped_ratios = ratios.clamp(1 - self.eps_clip, 1 + self.eps_clip)
 
         advantages = returns - scalar_old_values.detach()
-        normed_advantages = normalize(advantages, mask = mask)
+        maybe_normed_advantages = self.maybe_normalize(advantages, mask = mask)
 
-        surr1 = multiply('b n ..., b n ->  b n ...', ratios, normed_advantages)
-        surr2 = multiply('b n ..., b n ->  b n ...', clipped_ratios, normed_advantages)
+        surr1 = multiply('b n ..., b n ->  b n ...', ratios, maybe_normed_advantages)
+        surr2 = multiply('b n ..., b n ->  b n ...', clipped_ratios, maybe_normed_advantages)
 
         actor_loss = - torch.min(surr1, surr2) - self.entropy_weight * entropy
 
