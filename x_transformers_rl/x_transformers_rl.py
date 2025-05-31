@@ -22,6 +22,7 @@ from torch.nn.utils.rnn import pad_sequence
 pad_sequence = partial(pad_sequence, batch_first = True)
 
 import einx
+from einx import multiply, less, where
 from einops import reduce, repeat, einsum, rearrange, pack, unpack
 from einops.layers.torch import Rearrange
 
@@ -93,11 +94,22 @@ def first(arr):
 def identity(t, *args, **kwargs):
     return t
 
+def is_empty(t):
+    return t.numel() == 0
+
 def divisible_by(num, den):
     return (num % den) == 0
 
-def normalize(t, eps = 1e-5):
-    return (t - t.mean()) / (t.std() + eps)
+def normalize(t, mask = None, eps = 1e-5):
+    stats_t = t[mask] if exists(mask) else t
+
+    if is_empty(stats_t):
+        return t
+
+    num = (t - stats_t.mean())
+    den = stats_t.var().clamp(min = eps).sqrt()
+
+    return num / den
 
 def frac_gradient(t, frac = 1.):
     assert 0 <= frac <= 1.
@@ -179,7 +191,7 @@ class SafeEmbedding(Module):
         has_actions = actions >= 0.
         actions = torch.where(has_actions, actions, 0)
         embeds = self.embed(actions)
-        embeds = einx.where('b n, b n d, ', has_actions, embeds, 0.)
+        embeds = where('b n, b n d, ', has_actions, embeds, 0.)
         return embeds
 
 class Discrete:
@@ -283,7 +295,6 @@ class WorldModelActorCritic(Module):
         value_clip = 0.4,
         evolutionary = False,
         dim_latent_gene = None,
-        advantage_running_stats_momentum = 0.25 # 1. would be the "popular" way, not that it is the correct way
     ):
         super().__init__()
         self.transformer = transformer
@@ -373,14 +384,6 @@ class WorldModelActorCritic(Module):
 
         self.value_clip = value_clip
 
-        # advantage normalization related
-
-        self.norm_advantage = nn.Sequential(
-            Rearrange('b n -> b 1 n'),
-            nn.SyncBatchNorm(1, momentum = advantage_running_stats_momentum),
-            Rearrange('b 1 n -> b n'),
-        )
-
         self.register_buffer('dummy', tensor(0), persistent = False)
 
     @property
@@ -408,7 +411,8 @@ class WorldModelActorCritic(Module):
         actions,
         old_log_probs,
         returns,
-        old_values
+        old_values,
+        mask = None
     ):
         dist = self.action_type_klass(raw_actions)
         action_log_probs = dist.log_prob(actions)
@@ -423,10 +427,10 @@ class WorldModelActorCritic(Module):
         clipped_ratios = ratios.clamp(1 - self.eps_clip, 1 + self.eps_clip)
 
         advantages = returns - scalar_old_values.detach()
-        normed_advantages = self.norm_advantage(advantages)
+        normed_advantages = normalize(advantages, mask = mask)
 
-        surr1 = einx.multiply('b n ..., b n ->  b n ...', ratios, normed_advantages)
-        surr2 = einx.multiply('b n ..., b n ->  b n ...', clipped_ratios, normed_advantages)
+        surr1 = multiply('b n ..., b n ->  b n ...', ratios, normed_advantages)
+        surr2 = multiply('b n ..., b n ->  b n ...', clipped_ratios, normed_advantages)
 
         actor_loss = - torch.min(surr1, surr2) - self.entropy_weight * entropy
 
@@ -487,7 +491,7 @@ class WorldModelActorCritic(Module):
             sum_embeds = sum_embeds + action_embeds
 
         if exists(rewards):
-            reward_embeds = einx.multiply('..., d -> ... d', rewards, self.reward_embed)
+            reward_embeds = multiply('..., d -> ... d', rewards, self.reward_embed)
 
             maybe_dropout = self.reward_dropout(torch.ones((), device = device)) > 0.
 
@@ -895,7 +899,7 @@ class Agent(Module):
                     latent_gene = self.gene_pool[gene_ids]
 
                 seq = torch.arange(states.shape[1], device = self.device)
-                mask = einx.less('n, b -> b n', seq, episode_lens)
+                mask = less('n, b -> b n', seq, episode_lens)
 
                 prev_actions = pad_at_dim(
                     actions,
@@ -944,7 +948,8 @@ class Agent(Module):
                     actions,
                     old_log_probs,
                     returns,
-                    old_values
+                    old_values,
+                    mask = mask
                 )
 
                 critic_loss = model.compute_critic_loss(
