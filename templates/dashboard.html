@@ -1,0 +1,392 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FRALA Network Interface</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <style>
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            margin: 0; 
+            padding: 20px; 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            min-height: 100vh;
+        }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .header { text-align: center; margin-bottom: 30px; }
+        .header h1 { margin: 0; font-size: 2.5em; text-shadow: 2px 2px 4px rgba(0,0,0,0.3); }
+        .header p { margin: 10px 0; opacity: 0.9; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
+        .card { 
+            background: rgba(255,255,255,0.1); 
+            border-radius: 10px; 
+            padding: 20px; 
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.2);
+        }
+        .card h3 { margin-top: 0; color: #ffeb3b; }
+        .status-indicator { 
+            display: inline-block; 
+            width: 12px; 
+            height: 12px; 
+            border-radius: 50%; 
+            margin-right: 8px; 
+        }
+        .status-connected { background-color: #4caf50; }
+        .status-running { background-color: #ff9800; }
+        .status-idle { background-color: #9e9e9e; }
+        .button { 
+            background: #4caf50; 
+            color: white; 
+            border: none; 
+            padding: 10px 20px; 
+            border-radius: 5px; 
+            cursor: pointer; 
+            margin: 5px;
+        }
+        .button:hover { background: #45a049; }
+        .button.secondary { background: #2196f3; }
+        .button.secondary:hover { background: #1976d2; }
+        .log { 
+            background: rgba(0,0,0,0.3); 
+            border-radius: 5px; 
+            padding: 10px; 
+            height: 200px; 
+            overflow-y: scroll; 
+            font-family: monospace; 
+            font-size: 0.9em;
+        }
+        .metric { margin: 10px 0; }
+        .metric-label { font-weight: bold; }
+        .metric-value { color: #ffeb3b; }
+        #plotContainer { height: 300px; margin-top: 15px; }
+        .form-group { margin: 15px 0; }
+        .form-group label { display: block; margin-bottom: 5px; font-weight: bold; }
+        .form-group input, .form-group select { 
+            width: 100%; 
+            padding: 8px; 
+            border-radius: 5px; 
+            border: 1px solid rgba(255,255,255,0.3);
+            background: rgba(255,255,255,0.1);
+            color: white;
+        }
+        .form-group input::placeholder { color: rgba(255,255,255,0.7); }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🌀 FRALA Network Interface</h1>
+            <p>Fractal Reinforcement Learning Agent - Network Control System</p>
+            <p><span class="status-indicator" id="connectionStatus"></span>
+               <span id="connectionText">Connecting...</span></p>
+        </div>
+        
+        <div class="grid">
+            <!-- System Status -->
+            <div class="card">
+                <h3>📊 System Status</h3>
+                <div class="metric">
+                    <span class="metric-label">Status:</span>
+                    <span class="metric-value" id="systemStatus">Loading...</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">Active Experiments:</span>
+                    <span class="metric-value" id="activeExperiments">0</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">Active Agents:</span>
+                    <span class="metric-value" id="activeAgents">0</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">GPU Available:</span>
+                    <span class="metric-value" id="gpuStatus">Unknown</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">Connected Clients:</span>
+                    <span class="metric-value" id="connectedClients">0</span>
+                </div>
+            </div>
+            
+            <!-- Agent Control -->
+            <div class="card">
+                <h3>🤖 Agent Control</h3>
+                <div class="form-group">
+                    <label>Architecture:</label>
+                    <select id="architectureSelect">
+                        <option value="simple">Simple (2 levels)</option>
+                        <option value="medium">Medium (3 levels)</option>
+                        <option value="advanced">Advanced (4 levels)</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>State Dimension:</label>
+                    <input type="number" id="stateDim" value="8" min="1" max="100">
+                </div>
+                <div class="form-group">
+                    <label>Number of Actions:</label>
+                    <input type="number" id="numActions" value="4" min="1" max="100">
+                </div>
+                <button class="button" onclick="createAgent()">Create Agent</button>
+                <button class="button secondary" onclick="analyzeState()">Analyze State</button>
+            </div>
+            
+            <!-- Experiment Control -->
+            <div class="card">
+                <h3>🔬 Experiment Control</h3>
+                <div class="form-group">
+                    <label>Experiment Name:</label>
+                    <input type="text" id="expName" placeholder="experiment_name">
+                </div>
+                <div class="form-group">
+                    <label>Number of Updates:</label>
+                    <input type="number" id="numUpdates" value="10" min="1" max="1000">
+                </div>
+                <div class="form-group">
+                    <label>Environment:</label>
+                    <select id="environment">
+                        <option value="CartPole-v1">CartPole-v1</option>
+                        <option value="LunarLander-v3">LunarLander-v3</option>
+                    </select>
+                </div>
+                <button class="button" onclick="startExperiment()">Start Experiment</button>
+                <button class="button secondary" onclick="loadExperiments()">Load History</button>
+            </div>
+            
+            <!-- Real-time Metrics -->
+            <div class="card">
+                <h3>📈 Real-time Metrics</h3>
+                <div id="plotContainer"></div>
+                <div class="metric">
+                    <span class="metric-label">Latest Reward:</span>
+                    <span class="metric-value" id="latestReward">N/A</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">Fractal Diversity:</span>
+                    <span class="metric-value" id="fractalDiversity">N/A</span>
+                </div>
+            </div>
+            
+            <!-- Activity Log -->
+            <div class="card">
+                <h3>📝 Activity Log</h3>
+                <div class="log" id="activityLog"></div>
+                <button class="button secondary" onclick="clearLog()">Clear Log</button>
+            </div>
+            
+            <!-- Network Commands -->
+            <div class="card">
+                <h3>🌐 Network Commands</h3>
+                <button class="button" onclick="requestStatus()">Refresh Status</button>
+                <button class="button" onclick="pingSystem()">Ping System</button>
+                <button class="button secondary" onclick="downloadData()">Download Data</button>
+                <div class="metric" style="margin-top: 15px;">
+                    <span class="metric-label">Server Time:</span>
+                    <span class="metric-value" id="serverTime">N/A</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Initialize Socket.IO connection
+        const socket = io();
+        let rewardData = [];
+        let diversityData = [];
+        
+        // Socket event handlers
+        socket.on('connect', function() {
+            document.getElementById('connectionStatus').className = 'status-indicator status-connected';
+            document.getElementById('connectionText').textContent = 'Connected to FRALA System';
+            logActivity('✅ Connected to FRALA Network Interface');
+        });
+        
+        socket.on('disconnect', function() {
+            document.getElementById('connectionStatus').className = 'status-indicator status-idle';
+            document.getElementById('connectionText').textContent = 'Disconnected';
+            logActivity('❌ Disconnected from FRALA System');
+        });
+        
+        socket.on('system_status', function(data) {
+            updateSystemStatus(data);
+        });
+        
+        socket.on('system_status_update', function(data) {
+            updateSystemStatus(data);
+        });
+        
+        socket.on('experiment_update', function(data) {
+            updateMetrics(data.metrics);
+            logActivity(`📊 Experiment ${data.experiment_id} update: Reward ${data.metrics.avg_reward.toFixed(2)}`);
+        });
+        
+        // Update system status display
+        function updateSystemStatus(data) {
+            document.getElementById('systemStatus').textContent = data.status;
+            document.getElementById('activeExperiments').textContent = data.active_experiments;
+            document.getElementById('activeAgents').textContent = data.active_agents;
+            document.getElementById('gpuStatus').textContent = data.gpu_available ? `Yes (${data.device_count} devices)` : 'No';
+            document.getElementById('connectedClients').textContent = data.connected_clients;
+            document.getElementById('serverTime').textContent = new Date(data.timestamp).toLocaleTimeString();
+        }
+        
+        // Update real-time metrics
+        function updateMetrics(metrics) {
+            document.getElementById('latestReward').textContent = metrics.avg_reward.toFixed(2);
+            document.getElementById('fractalDiversity').textContent = 
+                metrics.representation_diversity.map(d => d.toFixed(3)).join(', ');
+            
+            // Update plots
+            rewardData.push({x: metrics.update, y: metrics.avg_reward});
+            if (rewardData.length > 50) rewardData.shift();
+            
+            updatePlot();
+        }
+        
+        // Update plot
+        function updatePlot() {
+            const trace = {
+                x: rewardData.map(d => d.x),
+                y: rewardData.map(d => d.y),
+                type: 'scatter',
+                mode: 'lines+markers',
+                name: 'Average Reward',
+                line: {color: '#ffeb3b', width: 2}
+            };
+            
+            const layout = {
+                title: 'Training Progress',
+                xaxis: {title: 'Update', color: 'white'},
+                yaxis: {title: 'Reward', color: 'white'},
+                plot_bgcolor: 'rgba(0,0,0,0.3)',
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                font: {color: 'white'}
+            };
+            
+            Plotly.newPlot('plotContainer', [trace], layout, {displayModeBar: false});
+        }
+        
+        // Log activity
+        function logActivity(message) {
+            const log = document.getElementById('activityLog');
+            const timestamp = new Date().toLocaleTimeString();
+            log.innerHTML += `[${timestamp}] ${message}<br>`;
+            log.scrollTop = log.scrollHeight;
+        }
+        
+        // API Functions
+        async function createAgent() {
+            const config = {
+                state_dim: parseInt(document.getElementById('stateDim').value),
+                num_actions: parseInt(document.getElementById('numActions').value),
+                reward_range: [-100, 100],
+                num_fractal_levels: 2,
+                fractal_embed_dim: 128,
+                fractal_heads: 4,
+                max_timesteps: 100,
+                num_episodes_per_update: 4
+            };
+            
+            try {
+                const response = await fetch('/api/agents', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(config)
+                });
+                const result = await response.json();
+                
+                if (result.success) {
+                    logActivity(`🤖 Created agent: ${result.agent_id}`);
+                } else {
+                    logActivity(`❌ Failed to create agent: ${result.error}`);
+                }
+            } catch (error) {
+                logActivity(`❌ Error creating agent: ${error.message}`);
+            }
+        }
+        
+        async function startExperiment() {
+            const config = {
+                name: document.getElementById('expName').value || 'network_experiment',
+                num_updates: parseInt(document.getElementById('numUpdates').value),
+                environment: document.getElementById('environment').value,
+                architecture: document.getElementById('architectureSelect').value
+            };
+            
+            try {
+                const response = await fetch('/api/experiments', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(config)
+                });
+                const result = await response.json();
+                
+                if (result.success) {
+                    logActivity(`🔬 Started experiment: ${result.experiment_id}`);
+                    socket.emit('subscribe_experiment', {experiment_id: result.experiment_id});
+                } else {
+                    logActivity(`❌ Failed to start experiment: ${result.error}`);
+                }
+            } catch (error) {
+                logActivity(`❌ Error starting experiment: ${error.message}`);
+            }
+        }
+        
+        async function analyzeState() {
+            const state = [Math.random(), Math.random(), Math.random(), Math.random(), 
+                          Math.random(), Math.random(), Math.random(), Math.random()];
+            logActivity(`🔍 Analyzing random state: [${state.map(s => s.toFixed(3)).join(', ')}]`);
+        }
+        
+        function requestStatus() {
+            socket.emit('request_status');
+            logActivity('📡 Requested system status update');
+        }
+        
+        function pingSystem() {
+            const start = Date.now();
+            fetch('/api/status')
+                .then(response => response.json())
+                .then(data => {
+                    const latency = Date.now() - start;
+                    logActivity(`🏓 Ping: ${latency}ms - Status: ${data.status}`);
+                })
+                .catch(error => {
+                    logActivity(`❌ Ping failed: ${error.message}`);
+                });
+        }
+        
+        function clearLog() {
+            document.getElementById('activityLog').innerHTML = '';
+        }
+        
+        function downloadData() {
+            logActivity('💾 Downloading system data...');
+            fetch('/api/experiments')
+                .then(response => response.json())
+                .then(data => {
+                    const blob = new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'});
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = 'frala_data.json';
+                    a.click();
+                    logActivity('💾 Data downloaded successfully');
+                })
+                .catch(error => {
+                    logActivity(`❌ Download failed: ${error.message}`);
+                });
+        }
+        
+        // Initialize
+        window.onload = function() {
+            logActivity('🌀 FRALA Network Interface initialized');
+            updatePlot();
+        };
+    </script>
+</body>
+</html>

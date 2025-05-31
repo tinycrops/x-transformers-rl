@@ -1,0 +1,22 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 5000,
+    "debug": false
+  },
+  "frala": {
+    "default_state_dim": 8,
+    "default_num_actions": 4,
+    "default_reward_range": [
+      -100,
+      100
+    ],
+    "max_agents": 10,
+    "max_concurrent_experiments": 5
+  },
+  "logging": {
+    "level": "INFO",
+    "save_logs": true,
+    "log_dir": "./logs"
+  }
+}
