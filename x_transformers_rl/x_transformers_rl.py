@@ -282,7 +282,8 @@ class WorldModelActorCritic(Module):
         eps_clip = 0.2,
         value_clip = 0.4,
         evolutionary = False,
-        dim_latent_gene = None
+        dim_latent_gene = None,
+        advantage_running_stats_momentum = 0.25 # 1. would be the "popular" way, not that it is the correct way
     ):
         super().__init__()
         self.transformer = transformer
@@ -372,6 +373,14 @@ class WorldModelActorCritic(Module):
 
         self.value_clip = value_clip
 
+        # advantage normalization related
+
+        self.norm_advantage = nn.Sequential(
+            Rearrange('b n -> b 1 n'),
+            nn.SyncBatchNorm(1, momentum = advantage_running_stats_momentum),
+            Rearrange('b 1 n -> b n'),
+        )
+
         self.register_buffer('dummy', tensor(0), persistent = False)
 
     @property
@@ -413,10 +422,11 @@ class WorldModelActorCritic(Module):
         ratios = (action_log_probs - old_log_probs).exp()
         clipped_ratios = ratios.clamp(1 - self.eps_clip, 1 + self.eps_clip)
 
-        advantages = normalize(returns - scalar_old_values.detach())
+        advantages = returns - scalar_old_values.detach()
+        normed_advantages = self.norm_advantage(advantages)
 
-        surr1 = einx.multiply('b n ..., b n ->  b n ...', ratios, advantages)
-        surr2 = einx.multiply('b n ..., b n ->  b n ...', clipped_ratios, advantages)
+        surr1 = einx.multiply('b n ..., b n ->  b n ...', ratios, normed_advantages)
+        surr2 = einx.multiply('b n ..., b n ->  b n ...', clipped_ratios, normed_advantages)
 
         actor_loss = - torch.min(surr1, surr2) - self.entropy_weight * entropy
 
