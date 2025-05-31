@@ -843,7 +843,7 @@ class Agent(Module):
         scalar_values = hl_gauss(values)
 
         returns = calc_gae(
-            rewards = rewards,            
+            rewards = rewards,
             masks = masks,
             lam = self.lam,
             gamma = self.gamma,
