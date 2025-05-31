@@ -1,0 +1,37 @@
+[
+  {
+    "update": 0,
+    "num_levels_processed": 2,
+    "level_shapes": [
+      [
+        10,
+        10,
+        128
+      ],
+      [
+        10,
+        10,
+        128
+      ]
+    ],
+    "level_feature_norms": [
+      35.449195861816406,
+      35.219383239746094
+    ],
+    "raw_actions_shape": [
+      10,
+      4
+    ],
+    "values_shape": [
+      10,
+      100
+    ],
+    "representation_diversity": [
+      0.01190948486328125,
+      0.03030848503112793
+    ],
+    "inter_level_similarity": [
+      0.9272827506065369
+    ]
+  }
+]
