@@ -32,6 +32,7 @@ learner = Learner(
     batch_size = 8,
     num_episodes_per_update = 64,
     evolve_every = 5,
+    evolve_after_step = 10,
     latent_gene_pool = dict(
         dim = 32,
         num_genes_per_island = 3,

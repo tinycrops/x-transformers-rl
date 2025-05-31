@@ -666,6 +666,7 @@ class Agent(Module):
         hidden_dim = 48,
         evolutionary = False,
         evolve_every = 1,
+        evolve_after_step = 20,
         latent_gene_pool: dict = dict(
             dim = 128,
             num_genes_per_island = 3,
@@ -700,6 +701,7 @@ class Agent(Module):
 
         self.evolutionary = evolutionary
         self.evolve_every = evolve_every
+        self.evolve_after_step = evolve_after_step
 
         if evolutionary:
             self.gene_pool = LatentGenePool(**latent_gene_pool)
@@ -1007,6 +1009,7 @@ class Agent(Module):
                 if (
                     self.evolutionary and
                     exists(fitnesses) and
+                    self.step.item() > self.evolve_after_step and
                     divisible_by(self.step.item(), self.evolve_every)
                 ):
                     self.gene_pool.evolve_(fitnesses)
